@@ -30,9 +30,19 @@ public enum SourceProbe {
     }
 
     /// 可解析头部的音频扩展名（其余扩展名即使被打开也不解析）
-    static let parseableExtensions: Set<String> = ["flac", "wav", "aif", "aiff", "dsf", "dff"]
+    static let parseableExtensions: Set<String> = ["flac", "wav", "aif", "aiff", "dsf", "dff", "m4a", "uc!"]
     /// 被播放器打开的其他媒体（仅供提示，暂不解析）
     static let mediaExtensions: Set<String> = ["m4a", "mp3", "ape", "ogg", "opus", "wv", "wma"]
+
+    /// 网易云音乐在线播放缓存（.uc!）：内容是整文件单字节 XOR 0xA3 的
+    /// 普通音频（实测 96k/24bit FLAC 与 320k AAC/M4A 均为此密钥）。
+    /// 只读取文件头的技术元数据（采样率/位深）用于匹配输出格式，
+    /// 不解密、不保存音频内容。
+    static let neteaseUCKey: UInt8 = 0xA3
+
+    static func isNeteaseUC(_ path: String) -> Bool {
+        (path as NSString).pathExtension.lowercased() == "uc!"
+    }
 
     static let maxHeaderBytes = 512 * 1024
 
@@ -91,13 +101,20 @@ public enum SourceProbe {
         return b.max(by: { $0.sampleRate < $1.sampleRate })
     }
 
-    /// lsof -w -n -o -F pfon → 每个数字 fd 对应的 (path, pid, offset)
+    /// lsof -w -n -o -F pfaon → 每个数字 fd 对应的 (path, pid, offset)。
+    /// 只保留读句柄：网易云边下边播时会同时持有同一缓存的读/写句柄，
+    /// 写句柄（下载）offset 前进远快于播放，会把「正在播放」判定带偏。
     static func runLsofFiles() -> [LsofFile] {
+        parseLsofOutput(runLsof())
+    }
+
+    static func parseLsofOutput(_ output: String) -> [LsofFile] {
         var files = [LsofFile]()
         var pid = 0
         var fdIsNumeric = false
         var offset: UInt64?
-        for line in runLsof().split(separator: "\n") {
+        var writeMode = false
+        for line in output.split(separator: "\n") {
             guard let tag = line.first else { continue }
             let rest = String(line.dropFirst())
             switch tag {
@@ -107,14 +124,18 @@ public enum SourceProbe {
             case "f": // f10 = 普通 fd；ftxt/fcwd/frtd 等非数字则跳过
                 fdIsNumeric = Int(rest) != nil
                 offset = nil
+                writeMode = false
+            case "a": // 访问模式：r=只读 u=读写 w=只写
+                writeMode = rest.lowercased().contains("w") && !rest.lowercased().contains("u")
             case "o":
                 offset = parseOffset(rest)
             case "n":
-                if fdIsNumeric {
+                if fdIsNumeric, !writeMode {
                     files.append(LsofFile(path: rest, pid: pid, offset: offset))
                 }
                 fdIsNumeric = false
                 offset = nil
+                writeMode = false
             default:
                 break
             }
@@ -132,7 +153,7 @@ public enum SourceProbe {
     static func runLsof() -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        p.arguments = ["-w", "-n", "-o", "-F", "pfon"]
+        p.arguments = ["-w", "-n", "-o", "-F", "pfaon"]
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
@@ -153,10 +174,86 @@ public enum SourceProbe {
         defer { try? fh.close() }
         guard let data = (try? fh.read(upToCount: maxHeaderBytes)).flatMap({ $0 }),
               data.count >= 26 else { return nil } // 各格式解析器内部有精确长度保护
+        if isNeteaseUC(path) {
+            return parseUC(data, path) ?? parseUCTail(fh, path)
+        }
         return parseFLAC(data, path)
+            ?? parseMP4(data, path)
             ?? parseWAV(data, path)
             ?? parseAIFF(data, path)
             ?? parseDSF(data, path)
+    }
+
+    /// 网易云 .uc! 缓存：整体 XOR 解出文件头再按普通格式解析。
+    /// 解不出则尝试文件尾（M4A 的 moov 常在文件末尾）。
+    static func parseUC(_ data: Data, _ path: String) -> Probe? {
+        let plain = Data(data.map { $0 ^ neteaseUCKey })
+        var p = parseFLAC(plain, path)
+            ?? parseMP4(plain, path)
+            ?? parseWAV(plain, path)
+            ?? parseAIFF(plain, path)
+            ?? parseDSF(plain, path)
+        if p != nil { p!.kind += "·网易云" }
+        return p
+    }
+
+    static func parseUCTail(_ fh: FileHandle, _ path: String) -> Probe? {
+        let end = (try? fh.seekToEnd()) ?? 0
+        guard end > maxHeaderBytes else { return nil }
+        fh.seek(toFileOffset: end - UInt64(maxHeaderBytes))
+        guard let data = (try? fh.read(upToCount: maxHeaderBytes)).flatMap({ $0 }) else { return nil }
+        var p = parseMP4(data, path)
+        if p != nil { p!.kind += "·网易云" }
+        return p
+    }
+
+    /// MP4/M4A：遍历 moov→trak→mdia，取音频轨（handler 'soun'）的 mdhd timescale。
+    /// AAC 为有损编码，位深无意义 → bitsPerSample 置 nil（不参与位深匹配）。
+    static func parseMP4(_ d: Data, _ path: String) -> Probe? {
+        struct Box {
+            var type: String
+            var start: Int
+            var end: Int
+        }
+        func boxes(_ lo: Int, _ hi: Int) -> [Box] {
+            var out = [Box]()
+            var off = lo
+            while off + 8 <= hi {
+                let sizeRaw = Int(be32(d, off))
+                guard off + 8 <= hi else { break }
+                let type = String(data: d[(off + 4) ..< min(off + 8, hi)], encoding: .ascii) ?? ""
+                var size = sizeRaw
+                if sizeRaw == 1 { // 64 位长度在 payload 前 8 字节
+                    guard off + 16 <= hi else { break }
+                    var s = 0
+                    for k in 0..<8 { s = (s << 8) | Int(d[off + 8 + k]) }
+                    size = s
+                }
+                guard size >= 8, off + size <= hi else { break }
+                out.append(Box(type: type, start: off + 8, end: off + size))
+                off += size
+            }
+            return out
+        }
+        let i = d.startIndex
+        guard let moov = boxes(i, d.endIndex).first(where: { $0.type == "moov" }) else { return nil }
+        for trak in boxes(moov.start, moov.end) where trak.type == "trak" {
+            guard let mdia = boxes(trak.start, trak.end).first(where: { $0.type == "mdia" }) else { continue }
+            let inner = boxes(mdia.start, mdia.end)
+            guard let hdlr = inner.first(where: { $0.type == "hdlr" }),
+                  hdlr.end - hdlr.start >= 12,
+                  d[hdlr.start + 8 ..< hdlr.start + 12] == Data("soun".utf8) else { continue }
+            guard let mdhd = inner.first(where: { $0.type == "mdhd" }),
+                  mdhd.end > mdhd.start else { continue }
+            let version = d[mdhd.start]
+            let tsOff = mdhd.start + (version == 1 ? 20 : 12)
+            guard tsOff + 4 <= mdhd.end else { continue }
+            let ts = be32(d, tsOff)
+            guard ts > 0 else { continue }
+            return Probe(path: path, sampleRate: Float64(ts),
+                         bitsPerSample: nil, channels: nil, kind: "M4A")
+        }
+        return nil
     }
 
     /// FLAC: "fLaC" + STREAMINFO(type 0) 固定 bitfield

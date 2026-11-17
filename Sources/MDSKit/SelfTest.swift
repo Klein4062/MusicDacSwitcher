@@ -246,6 +246,51 @@ public func runSelfTest() {
         try? flac.write(to: flacURL)
         let p2 = SourceProbe.parseHeader(flacURL.path)
         expect("FLAC 头解析 96k/24bit/2ch", p2?.sampleRate == 96000 && p2?.bitsPerSample == 24 && p2?.channels == 2)
+
+        // 网易云 .uc! 加密缓存：整体 XOR 0xA3（96k/24bit FLAC，实测格式）
+        let uc = Data(flac.map { $0 ^ SourceProbe.neteaseUCKey })
+        let ucURL = tmp.appendingPathComponent("mds-selftest.uc!")
+        try? uc.write(to: ucURL)
+        let p3 = SourceProbe.parseHeader(ucURL.path)
+        expect(".uc! 解密后解析 FLAC 96k/24bit/2ch",
+               p3?.sampleRate == 96000 && p3?.bitsPerSample == 24 && p3?.channels == 2)
+        expect(".uc! 标注来源为网易云", p3?.kind.contains("网易云") == true)
+
+        // 网易云 .uc! 内的 M4A/AAC（moov 在文件头）：取音频轨 mdhd timescale
+        func mp4Box(_ type: String, _ payload: Data) -> Data {
+            var box = Data()
+            var len = UInt32(payload.count + 8)
+            box.append(contentsOf: [UInt8((len >> 24) & 0xFF), UInt8((len >> 16) & 0xFF),
+                                    UInt8((len >> 8) & 0xFF), UInt8(len & 0xFF)])
+            box.append(Data(type.utf8))
+            box.append(payload)
+            return box
+        }
+        var mdhd = Data([0, 0, 0, 0])           // version 0 + flags
+        mdhd.append(contentsOf: [0, 0, 0, 0])   // creation
+        mdhd.append(contentsOf: [0, 0, 0, 0])   // modification
+        var ts: UInt32 = 44100
+        mdhd.append(contentsOf: [UInt8((ts >> 24) & 0xFF), UInt8((ts >> 16) & 0xFF),
+                                 UInt8((ts >> 8) & 0xFF), UInt8(ts & 0xFF)])
+        mdhd.append(contentsOf: [0, 0, 0, 0])   // duration
+        var hdlr = Data([0, 0, 0, 0])           // version + flags
+        hdlr.append(contentsOf: [0, 0, 0, 0])   // pre_defined
+        hdlr.append(Data("soun".utf8))
+        let mdia = mp4Box("mdia", mp4Box("mdhd", mdhd) + mp4Box("hdlr", hdlr))
+        let m4a = mp4Box("ftyp", Data("M4A ".utf8) + Data([0, 0, 0, 0]))
+            + mp4Box("moov", mp4Box("trak", mdia))
+        let ucM4aURL = tmp.appendingPathComponent("mds-selftest-m4a.uc!")
+        try? Data(m4a.map { $0 ^ SourceProbe.neteaseUCKey }).write(to: ucM4aURL)
+        let p4 = SourceProbe.parseHeader(ucM4aURL.path)
+        expect(".uc! 内 M4A 解析音频轨 44.1k",
+               p4?.sampleRate == 44100 && p4?.kind.contains("M4A") == true)
+        expect(".uc! 内 M4A 位深为 nil（有损不参与位深匹配）", p4?.bitsPerSample == nil)
+
+        // M4A 明文（非加密）同样可解析
+        let m4aURL = tmp.appendingPathComponent("mds-selftest.m4a")
+        try? m4a.write(to: m4aURL)
+        let p5 = SourceProbe.parseHeader(m4aURL.path)
+        expect("明文 M4A 解析 44.1k", p5?.sampleRate == 44100)
     }
 
     // 源探测：正在播放文件识别（offset 前进检测）
@@ -273,6 +318,26 @@ public func runSelfTest() {
         expect("lsof offset \"0t548680\" 解析", SourceProbe.parseOffset("0t548680") == 548_680)
         expect("lsof offset \"548680\" 解析", SourceProbe.parseOffset("548680") == 548_680)
         expect("lsof offset \"0x10\" 拒绝", SourceProbe.parseOffset("0x10") == nil)
+        // lsof 输出解析：跳过写句柄（边下边播），保留读/读写句柄
+        let lsofText = """
+        p123
+        f91
+        ar
+        o0t1000
+        n/a/play.uc!
+        f100
+        aw
+        o0t5000000
+        n/a/download.uc!
+        f101
+        au
+        o0t2000
+        n/a/other.flac
+        """
+        let files = SourceProbe.parseLsofOutput(lsofText)
+        expect("lsof 解析跳过只写句柄（下载）",
+               files.count == 2 && !files.contains { $0.path == "/a/download.uc!" })
+        expect("lsof 解析保留读写句柄", files.contains { $0.path == "/a/other.flac" })
         // 空集
         expect("空扫描返回 nil", SourceProbe.pickPlaying(a: [], b: []) == nil)
     }
