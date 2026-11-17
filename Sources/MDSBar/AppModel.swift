@@ -326,9 +326,9 @@ final class AppModel: ObservableObject {
     func optimizeNow() {
         guard let id = currentDeviceID else { return }
         guard !AudioDevice.isRunningSomewhere(id) else {
-            // 播放中改设备格式（哪怕只是标称采样率）会打乱播放器已建立的
-            // 送数节奏，实测会导致音频中断或播放被加速，因此只提示不执行
-            log("播放中不修改设备格式（避免打断播放或变速）；暂停/停止播放后会自动应用，也可届时点「立即优化」")
+            // 播放中由源探测按源采样率/位深实时匹配（与「音频 MIDI 设置」一致）；
+            // 手动优化拿不到源位深，只会按当前位深策略执行，因此留到空闲时
+            log("播放中已由源探测实时匹配；手动优化按位深策略执行，请在暂停/停止后点击")
             return
         }
         Task.detached { [controller] in

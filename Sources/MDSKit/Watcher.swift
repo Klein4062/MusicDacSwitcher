@@ -81,6 +81,10 @@ public final class DeviceWatcher {
     private var probeTimer: DispatchSourceTimer?
     private var lastProbeKey: String?
     private var lastProbeDate: Date?
+    /// 播放中写入失败的文件 key 与时间：30 秒内不重复重试，
+    /// 避免驱动拒绝某个位深时每 4 秒暂停/恢复一次 IO
+    private var lastFailedKey: String?
+    private var lastFailedAt: Date?
     private var manualOverrideDeadline = Date.distantPast
     private var probeBusy = false
     private var nilStreak = 0
@@ -96,8 +100,10 @@ public final class DeviceWatcher {
     private var playSettleUntil = Date.distantPast
     /// 设备开始空闲（无任何音频 IO）的时刻
     private var idleSince = Date()
-    /// 播放中探测到、但尚不能应用的目标采样率（播放中禁止写设备）
+    /// 播放中探测到、但尚未成功应用的目标采样率（写失败时的兜底）
     private var pendingRate: Float64?
+    /// 待应用目标的源位深（自动模式下按源匹配）
+    private var pendingBits: Int?
     /// 待应用目标的来源描述（日志用）
     private var pendingSource: String?
     /// 设备连续空闲多少秒后才允许在空闲期写格式：
@@ -278,22 +284,24 @@ public final class DeviceWatcher {
     }
 
     /// 调用控制器切换，并记录「确实改动了格式」的时间（熔断判定依据）
+    @discardableResult
     private func applyWatched(deviceID: AudioObjectID,
                               streamID: AudioObjectID,
                               desiredRate: Float64,
                               sourceBits: Int? = nil,
                               channels: Int? = 2,
-                              context: String) {
+                              context: String) -> Bool {
         let before = AudioDevice.streamPhysicalFormat(streamID)
-        controller.applyBestFormat(deviceID: deviceID, streamID: streamID,
-                                   desiredRate: desiredRate,
-                                   sourceBits: sourceBits,
-                                   channels: channels,
-                                   context: context)
+        let result = controller.applyBestFormat(deviceID: deviceID, streamID: streamID,
+                                                desiredRate: desiredRate,
+                                                sourceBits: sourceBits,
+                                                channels: channels,
+                                                context: context)
         let after = AudioDevice.streamPhysicalFormat(streamID)
         if let before, let after, !sameFormat(before, after) {
             writeGuard.noteWrite(at: Date())
         }
+        return result != nil
     }
 
     /// 默认输出设备变化（防抖 0.5s 合并）：设备反复插拔时事件可达每秒
@@ -388,31 +396,85 @@ public final class DeviceWatcher {
             controller.logV("源探测被手动切换抑制：\(best)")
             return
         }
-        // 幂等：同一文件且标称采样率已匹配则跳过
-        if best.key == lastProbeKey, rateMatches(best.sampleRate) { return }
+        let wantBits = desiredSourceBits(best)
+        // 幂等：同一文件且设备格式（采样率 + 位深）已匹配则跳过
+        if best.key == lastProbeKey, formatSatisfied(rate: best.sampleRate, sourceBits: wantBits) {
+            return
+        }
         lastProbeKey = best.key
-        // 播放中绝不写设备，连标称采样率也不能改。
-        //
-        // 实测（索尼 Hi-Res 播放器）：播放器在起播时按当时的设备率建立
-        // 重采样/送数节奏，播放中途改设备率会让它继续按旧节奏送数据，
-        // 表现为音频被中断，或恢复后播放速度/音高异常（被加速）。
-        // 因此这里只登记目标格式，等设备持续空闲（暂停/停止）时再应用。
-        if rateMatches(best.sampleRate) {
-            if pendingRate != nil {
-                controller.logV("设备采样率已匹配 \(hz(best.sampleRate))，取消待切换")
+
+        if formatSatisfied(rate: best.sampleRate, sourceBits: wantBits) {
+            if pendingRate != nil || pendingBits != nil {
+                controller.logV("设备格式已匹配 \(hz(best.sampleRate))，取消待切换")
             }
             pendingRate = nil
+            pendingBits = nil
             pendingSource = nil
             return
         }
-        let current = AudioDevice.nominalRate(currentDevice).map(hz) ?? "?"
-        if pendingRate != best.sampleRate {
-            log("播放中源为 \(hz(best.sampleRate))，设备当前 \(current)："
-                + "为避免打断播放/变速，暂停或停止播放后自动切换")
+
+        // 播放中直接应用：与「音频 MIDI 设置」写入的是同一条 HAL 属性，
+        // 切换后物理格式保持可混音交错（0xc）、虚拟格式保持 float。
+        // （此前播放中切换导致加速的根因是写入了 NonMixable 的 0x4c 格式，
+        //  已由 FormatMatcher / FormatController 两层过滤修复。）
+        let failedRecently = best.key == lastFailedKey
+            && (lastFailedAt.map { Date().timeIntervalSince($0) < 30 } ?? false)
+        if !failedRecently {
+            guard let streamID = AudioDevice.outputStreams(currentDevice).first else { return }
+            let srcBits = wantBits.map { "/\($0)bit" } ?? ""
+            let currentDesc = AudioDevice.streamPhysicalFormat(streamID).map(describe) ?? "?"
+            log("播放中源为 \(hz(best.sampleRate))\(srcBits)，设备当前 \(currentDesc)：立即匹配")
+            let ok = applyWatched(deviceID: currentDevice, streamID: streamID,
+                                  desiredRate: best.sampleRate,
+                                  sourceBits: wantBits,
+                                  context: "播放中匹配（源 \(URL(fileURLWithPath: best.path).lastPathComponent)）")
+            if ok {
+                lastFailedKey = nil
+                lastFailedAt = nil
+                pendingRate = nil
+                pendingBits = nil
+                pendingSource = nil
+                onEvent?("源探测（已匹配）")
+                return
+            }
+            lastFailedKey = best.key
+            lastFailedAt = Date()
+        }
+        // 写失败（驱动拒绝/设备忙）：登记目标，等设备持续空闲后再应用
+        if pendingRate != best.sampleRate || pendingBits != wantBits {
+            log("播放中切换未成功，暂停或停止播放后自动应用")
         }
         pendingRate = best.sampleRate
+        pendingBits = wantBits
         pendingSource = best.key
         onEvent?("源探测（待切换）")
+    }
+
+    /// 自动模式下参与位深匹配的源位深。
+    /// DSD（Probe 中记为 1bit）等无意义的位深不参与，交给设备最高位深。
+    private func desiredSourceBits(_ probe: SourceProbe.Probe) -> Int? {
+        guard let bits = probe.bitsPerSample, bits >= 16 else { return nil }
+        return bits
+    }
+
+    /// 设备当前格式是否已经是「该源在自动模式下应到达的格式」。
+    /// 采样率相同但位深不同（如源 24bit、设备 32bit）也算不匹配。
+    private func formatSatisfied(rate: Float64, sourceBits: Int?) -> Bool {
+        guard rateMatches(rate) else { return false }
+        guard let sourceBits else { return true }
+        guard let streamID = AudioDevice.outputStreams(currentDevice).first,
+              let phys = AudioDevice.streamPhysicalFormat(streamID) else { return true }
+        let policy: BitDepthPolicy
+        if case .highest = controller.policy {
+            policy = .match(sourceBits)
+        } else {
+            policy = controller.policy
+        }
+        guard let planned = FormatMatcher.select(
+            targetRate: rate, targetBits: sourceBits, preferredChannels: 2,
+            entries: AudioDevice.streamAvailablePhysicalFormats(streamID),
+            policy: policy) else { return true }
+        return sameFormat(phys, planned.asbd)
     }
 
     /// 设备标称采样率是否已与探测结果匹配
@@ -443,9 +505,9 @@ public final class DeviceWatcher {
                             : "稳定期内，跳过格式评估 · \(context)")
             return
         }
-        // 播放中不改物理格式：多数播放器（含索尼 Hi-Res）在流式输出时
-        // 物理格式被改会直接中断音频；采样率跟随统一走源探测的温和路径。
-        controller.logV("播放中不改物理格式（避免中断播放器）· \(context)")
+        // 播放中的格式跟随由源探测驱动（能同时拿到源采样率与位深，
+        // 并按源精确匹配）；这里只处理设备事件，不重复写格式。
+        controller.logV("播放中格式由源探测匹配 · \(context)")
     }
 
     /// 空闲应用：设备持续空闲时，把「播放中登记的目标格式」写进去
@@ -462,6 +524,7 @@ public final class DeviceWatcher {
         guard !AudioDevice.isRunningSomewhere(currentDevice) else { return }
         let isPending = pendingRate != nil
         let source = pendingSource
+        let bits = isPending ? pendingBits : nil
         // 还没空闲够久（可能只是切歌间隙）：等到满足条件的那一刻再试
         let wait = max(0.05, idleApplyDelay - Date().timeIntervalSince(idleSince))
 
@@ -477,12 +540,14 @@ public final class DeviceWatcher {
             self.applyWatched(deviceID: self.currentDevice,
                               streamID: streamID,
                               desiredRate: pending,
+                              sourceBits: bits,
                               context: isPending
                                   ? "空闲应用（上次播放源 \(source ?? hz(pending))）"
                                   : "空闲恢复")
             // 目标已尝试应用（成功与否都以设备回读为准），清除待办
             if self.pendingRate == pending {
                 self.pendingRate = nil
+                self.pendingBits = nil
                 self.pendingSource = nil
             }
         }
