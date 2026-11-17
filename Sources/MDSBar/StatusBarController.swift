@@ -14,10 +14,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @MainActor
-final class StatusBarController: NSObject {
+final class StatusBarController: NSObject, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
     private let model = AppModel.shared
+    /// 点击其他应用/桌面时关闭面板。LSUIElement 应用在未激活状态下
+    /// NSPopover 的 .transient 不会自动关闭，需要全局事件监听兜底。
     private var eventMonitor: Any?
 
     override init() {
@@ -33,6 +35,7 @@ final class StatusBarController: NSObject {
         }
 
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentSize = NSSize(width: 396, height: 660)
         popover.contentViewController = NSHostingController(
             rootView: PopoverRootView().environmentObject(model))
@@ -56,10 +59,45 @@ final class StatusBarController: NSObject {
 
     @objc private func togglePopover(_ sender: NSStatusBarButton) {
         if popover.isShown {
-            popover.performClose(sender)
+            closePopover()
         } else {
             popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+            // 激活后 .transient 才能在点击其他应用时正常关闭
+            if #available(macOS 14.0, *) {
+                NSApp.activate()
+            } else {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            installOutsideClickMonitor()
             model.popoverDidOpen()
         }
+    }
+
+    private func closePopover() {
+        popover.performClose(nil)
+        removeOutsideClickMonitor()
+    }
+
+    private func installOutsideClickMonitor() {
+        removeOutsideClickMonitor()
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.popover.isShown else { return }
+                self.closePopover()
+            }
+        }
+    }
+
+    private func removeOutsideClickMonitor() {
+        guard let monitor = eventMonitor else { return }
+        NSEvent.removeMonitor(monitor)
+        eventMonitor = nil
+    }
+
+    // MARK: - NSPopoverDelegate
+
+    func popoverDidClose(_ notification: Notification) {
+        removeOutsideClickMonitor()
     }
 }
