@@ -1,0 +1,312 @@
+// Watcher.swift — 设备属性监听与自动切换调度
+//
+// 监听（均为 CoreAudio 官方属性）：
+//   · 系统默认输出设备变化          → 重新绑定
+//   · 设备标称采样率变化            → macOS 播放时会把设备切到音源采样率，此时优化位深
+//   · 设备任意 IO 启停              → 播放开始/结束时重新评估
+//   · 设备物理格式变化              → 播放器独占结束/外部修改后的善后
+//
+// 防抖：系统切换采样率、我们设置物理格式等都会引发连锁事件，
+//       统一 debounce 0.35s 合并；切换是幂等的（已是目标格式则不动作）。
+
+import CoreAudio
+import Foundation
+import Dispatch
+
+/// 单个属性的监听器（持有 block 以便移除）
+final class PropertyListener {
+    private let objectID: AudioObjectID
+    private let address: AudioObjectPropertyAddress
+    private let queue = DispatchQueue(label: "mds.prop.listener")
+    private var block: AudioObjectPropertyListenerBlock?
+
+    init?(objectID: AudioObjectID,
+          selector: AudioObjectPropertySelector,
+          scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+          handler: @escaping () -> Void) {
+        self.objectID = objectID
+        var addr = caAddress(selector, scope)
+        guard AudioObjectHasProperty(objectID, &addr) else { return nil }
+        self.address = addr
+
+        let b: AudioObjectPropertyListenerBlock = { _, _ in handler() }
+        self.block = b
+        let st = AudioObjectAddPropertyListenerBlock(objectID, &addr, queue, b)
+        guard st == noErr else {
+            self.block = nil
+            return nil
+        }
+    }
+
+    func remove() {
+        guard let b = block else { return }
+        var addr = address
+        AudioObjectRemovePropertyListenerBlock(objectID, &addr, queue, b)
+        block = nil
+    }
+
+    deinit { remove() }
+}
+
+public final class DeviceWatcher {
+    /// nil = 跟随系统默认输出设备；否则为 UID/名称查询串
+    public let deviceQuery: String?
+    public let controller: FormatController
+    /// 每次设备事件（无论是否执行切换）回调，供 UI 刷新状态
+    public var onEvent: ((String) -> Void)?
+    /// 空闲（无任何 IO）超过约 3 秒后恢复到的采样率；nil 表示不恢复
+    public let restoreRate: Float64?
+    /// 源探测轮询间隔（秒）
+    public var probeInterval: Double = 4
+    /// 源探测开关（GUI 可切换）
+    public var probeEnabled = true
+
+    private let queue = DispatchQueue(label: "mds.watch")
+    private var listeners: [PropertyListener] = []
+    private var currentDevice: AudioObjectID = 0
+    private var debounce: DispatchWorkItem?
+    private var restoreWork: DispatchWorkItem?
+    private var probeTimer: DispatchSourceTimer?
+    private var lastProbeKey: String?
+    private var lastProbeDate: Date?
+    private var manualOverrideDeadline = Date.distantPast
+    private var probeBusy = false
+    private var nilStreak = 0
+    private var stopped = false
+
+    public init(deviceQuery: String?, controller: FormatController, restoreRate: Float64? = nil,
+                probeEnabled: Bool = true, probeInterval: Double = 4) {
+        self.deviceQuery = deviceQuery
+        self.controller = controller
+        self.restoreRate = restoreRate
+        self.probeEnabled = probeEnabled
+        self.probeInterval = probeInterval
+    }
+
+    public func start() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.stopped = false
+            self.rebind(reason: "启动")
+            self.startProbeTimer()
+        }
+    }
+
+    /// 停止监听（设备切换/退出时）
+    public func stop() {
+        queue.async { [weak self] in
+            self?.stopped = true
+            self?.listeners.forEach { $0.remove() }
+            self?.listeners.removeAll()
+            self?.debounce?.cancel()
+            self?.restoreWork?.cancel()
+            self?.probeTimer?.cancel()
+            self?.probeTimer = nil
+            self?.currentDevice = 0
+        }
+    }
+
+    /// 手动切换后抑制源探测覆盖（秒）
+    public func suppressProbe(seconds: Double) {
+        queue.async { self.manualOverrideDeadline = Date().addingTimeInterval(seconds) }
+    }
+
+    private func startProbeTimer() {
+        probeTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 2, repeating: max(probeInterval, 1.5))
+        t.setEventHandler { [weak self] in self?.probeTick() }
+        t.resume()
+        probeTimer = t
+    }
+
+    // MARK: - 绑定
+
+    private func rebind(reason: String) {
+        listeners.forEach { $0.remove() }
+        listeners.removeAll()
+        currentDevice = 0
+
+        guard !stopped else { return }
+        guard let deviceID = AudioDevice.findDevice(matching: deviceQuery) else {
+            log("未找到匹配的输出设备（\(deviceQuery ?? "默认")），5 秒后重试 · \(reason)")
+            queue.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.rebind(reason: "重试")
+            }
+            return
+        }
+        currentDevice = deviceID
+        let snap = AudioDevice.snapshot(deviceID: deviceID)
+        log("监听设备：「\(snap.name)」 uid=\(snap.uid) · nominal=\(snap.nominalRate.map(hz) ?? "?") · \(reason)")
+        if let cur = snap.streams.first?.physical {
+            log("  当前格式：\(describe(cur))")
+        }
+
+        // 设备级监听
+        if let l = PropertyListener(objectID: deviceID, selector: kAudioDevicePropertyNominalSampleRate,
+                                    handler: { [weak self] in self?.scheduleEvaluate("采样率变化") }) {
+            listeners.append(l)
+        }
+        if let l = PropertyListener(objectID: deviceID, selector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+                                    handler: { [weak self] in self?.scheduleEvaluate("播放状态变化") }) {
+            listeners.append(l)
+        }
+        // 每个输出流：物理格式变化（外部播放器/系统修改后的善后）
+        for streamID in AudioDevice.outputStreams(deviceID) {
+            if let l = PropertyListener(objectID: streamID, selector: kAudioStreamPropertyPhysicalFormat,
+                                        handler: { [weak self] in self?.scheduleEvaluate("物理格式变化") }) {
+                listeners.append(l)
+            }
+        }
+        // 跟随默认设备：系统级监听
+        if deviceQuery == nil,
+           let l = PropertyListener(objectID: AudioObjectID(kAudioObjectSystemObject),
+                                    selector: kAudioHardwarePropertyDefaultOutputDevice,
+                                    handler: { [weak self] in
+                                        self?.queue.async { self?.rebind(reason: "默认输出设备变化") }
+                                    }) {
+            listeners.append(l)
+        }
+
+        scheduleEvaluate("初始评估")
+    }
+
+    // MARK: - 评估调度
+
+    private func scheduleEvaluate(_ context: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.onEvent?(context)
+            self.debounce?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                self?.evaluateNow(context: context)
+            }
+            self.debounce = item
+            self.queue.asyncAfter(deadline: .now() + 0.35, execute: item)
+
+            self.handleIdleRestore()
+        }
+    }
+
+    // MARK: - 源探测（本地音频文件格式发现）
+
+    private func probeTick() {
+        guard !stopped, probeEnabled, currentDevice != 0 else { return }
+        guard controller.enabled else { return }
+        guard AudioDevice.isRunningSomewhere(currentDevice) else {
+            // 无播放：清除探测状态，处理空闲恢复
+            if lastProbeKey != nil { lastProbeKey = nil }
+            nilStreak = 0
+            handleIdleRestore()
+            return
+        }
+        if let hog = AudioDevice.hogPID(currentDevice), hog != -1 {
+            return // 播放器独占（hog），由播放器自行管理格式
+        }
+        guard !probeBusy else { return }
+
+        // 双快照识别「正在播放」的文件：播放器常常同时打开多个音频文件
+        // （播放列表预读、播完不关闭的残留句柄），采样率最高者未必是正在
+        // 播放的那首。正在播放的文件读取偏移持续前进，残留句柄停滞——
+        // 间隔 1.3s 两次扫描，挑 offset 前进最快者。
+        probeBusy = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let a = SourceProbe.scan()
+            let best: SourceProbe.Probe?
+            if a.isEmpty {
+                best = nil
+            } else {
+                Thread.sleep(forTimeInterval: 1.3)
+                let b = SourceProbe.scan()
+                best = SourceProbe.pickPlaying(a: a, b: b)
+            }
+            self?.queue.async { [weak self] in
+                self?.probeBusy = false
+                self?.applyProbe(best)
+            }
+        }
+    }
+
+    /// 应用一次源探测决策（在 watch 串行队列上调用）
+    private func applyProbe(_ best: SourceProbe.Probe?) {
+        guard !stopped, currentDevice != 0 else { return }
+        guard let best else {
+            // 播放中的文件不可识别（流媒体）或读取信号瞬时中断
+            // （文件回绕/换歌间隙）：连续 3 个周期无前进证据才认为
+            // 源不可知，交回「跟随设备采样率」路径，避免位深抖动
+            nilStreak += 1
+            if nilStreak >= 3 {
+                lastProbeKey = nil
+                lastProbeDate = nil
+            }
+            return
+        }
+        nilStreak = 0
+        lastProbeDate = Date()
+        guard Date() >= manualOverrideDeadline else {
+            controller.logV("源探测被手动切换抑制：\(best)")
+            return
+        }
+        guard let streamID = AudioDevice.outputStreams(currentDevice).first else { return }
+        // 幂等：同一文件且设备仍处于匹配格式才跳过。
+        // （设备被外部/手动改走、或上次应用失败时，即使文件未变也重新纠正）
+        if best.key == lastProbeKey, deviceMatches(best, streamID: streamID) { return }
+        lastProbeKey = best.key
+        controller.applyBestFormat(deviceID: currentDevice,
+                                   streamID: streamID,
+                                   desiredRate: best.sampleRate,
+                                   sourceBits: best.bitsPerSample,
+                                   channels: best.channels ?? 2,
+                                   context: "源探测 \(best)")
+        onEvent?("源探测")
+    }
+
+    /// 设备当前物理格式是否已与探测结果匹配（采样率一致；位深按策略）
+    private func deviceMatches(_ p: SourceProbe.Probe, streamID: AudioObjectID) -> Bool {
+        guard let cur = AudioDevice.streamPhysicalFormat(streamID) else { return false }
+        guard abs(cur.mSampleRate - p.sampleRate) < 0.5 else { return false }
+        guard let bits = p.bitsPerSample else { return true }
+        if Int(cur.mBitsPerChannel) == bits { return true }
+        // 位深不一致：若策略本就不要求匹配源位深，视为匹配
+        switch controller.policy {
+        case .highest, .fixed: return true
+        case .match: return false
+        }
+    }
+
+    private func evaluateNow(context: String) {
+        guard currentDevice != 0 else { return }
+        guard AudioDevice.findDevice(matching: deviceQuery) == currentDevice
+            || (deviceQuery == nil && AudioDevice.defaultOutputDeviceID() == currentDevice) else {
+            rebind(reason: "设备已失效 · \(context)")
+            return
+        }
+        // 源探测近期已决策（3 个探测周期内）：由探测主导，避免与 nominal 路径抖动
+        if let d = lastProbeDate, Date().timeIntervalSince(d) < max(probeInterval, 1.5) * 3 {
+            controller.logV("由源探测主导，跳过 nominal 评估 · \(context)")
+            return
+        }
+        controller.evaluateAndApply(deviceID: currentDevice, context: context)
+    }
+
+    /// 空闲恢复：设备无任何 IO 持续 ~3 秒后，切回 restoreRate 的最佳格式
+    private func handleIdleRestore() {
+        restoreWork?.cancel()
+        restoreWork = nil
+        guard let rate = restoreRate, currentDevice != 0 else { return }
+        guard !AudioDevice.isRunningSomewhere(currentDevice) else { return }
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.currentDevice != 0 else { return }
+            guard !AudioDevice.isRunningSomewhere(self.currentDevice) else { return }
+            if let hog = AudioDevice.hogPID(self.currentDevice), hog != -1 { return }
+            guard let streamID = AudioDevice.outputStreams(self.currentDevice).first else { return }
+            self.controller.applyBestFormat(deviceID: self.currentDevice,
+                                            streamID: streamID,
+                                            desiredRate: rate,
+                                            context: "空闲恢复")
+        }
+        restoreWork = item
+        queue.asyncAfter(deadline: .now() + 3.0, execute: item)
+    }
+}
