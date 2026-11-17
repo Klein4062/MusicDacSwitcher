@@ -99,5 +99,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         removeOutsideClickMonitor()
+        model.popoverDidClose()
     }
 }

@@ -76,7 +76,7 @@ struct HeaderCard: View {
                         BadgeView(text: badge, fg: .secondary, bg: .primary.opacity(0.08))
                     }
                     Spacer()
-                    RunningDot(running: model.isRunning)
+                    RunningDot(running: model.isRunning, visible: model.popoverVisible)
                     if model.isHogged {
                         BadgeView(text: "HOG", fg: .orange, bg: .orange.opacity(0.15))
                     }
@@ -108,29 +108,100 @@ struct HeaderCard: View {
     }
 }
 
-/// 播放中呼吸圆点：repeatForever 动画由 Core Animation 驱动，
-/// 不逐帧重算 SwiftUI body（TimelineView 方案会以 16fps 重绘整棵树）
+/// 播放中呼吸圆点。动画用 CALayer + CABasicAnimation：
+/// 在系统 render server 进程执行，本进程零逐帧开销。
+/// （SwiftUI 的 repeatForever 动画挂在 display link 上每帧主线程求值，
+///  即使面板隐藏也持续运行，实测常驻 ~10% CPU；TimelineView 同样要逐帧驱动。）
+/// `visible` 在面板隐藏时移除动画，render server 不再持有本窗口的图层树。
 struct RunningDot: View {
     var running: Bool
+    var visible: Bool
 
     var body: some View {
         HStack(spacing: 4) {
-            ZStack {
-                Circle()
-                    .fill(running ? Color.green : Color.secondary.opacity(0.5))
-                    .frame(width: 7, height: 7)
-                    .scaleEffect(running ? 1.35 : 1.0)
-                    .shadow(color: running ? .green.opacity(0.75) : .clear, radius: 3)
-                    .animation(running
-                               ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
-                               : .easeOut(duration: 0.2),
-                               value: running)
-            }
-            .frame(width: 10, height: 10)
+            PulseDotLayer(running: running && visible)
+                .frame(width: 16, height: 16)
             Text(running ? "播放中" : "空闲")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+struct PulseDotLayer: NSViewRepresentable {
+    var running: Bool
+
+    func makeNSView(context: Context) -> PulseDotView {
+        PulseDotView()
+    }
+
+    func updateNSView(_ v: PulseDotView, context: Context) {
+        v.setRunning(running)
+    }
+}
+
+final class PulseDotView: NSView {
+    private let dot = CALayer()
+    private let ring = CALayer()
+    private var appliedRunning: Bool?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        dot.name = "dot"
+        dot.cornerRadius = 3.5
+        ring.name = "ring"
+        ring.cornerRadius = 5
+        ring.borderWidth = 1.5
+        layer?.addSublayer(dot)
+        layer?.addSublayer(ring)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("不支持 IB 构建") }
+
+    func setRunning(_ running: Bool) {
+        guard running != appliedRunning else { return }
+        appliedRunning = running
+        needsLayout = true
+        dot.removeAnimation(forKey: "breathe")
+        ring.removeAnimation(forKey: "breathe")
+        guard running else { return }
+
+        let grow = CABasicAnimation(keyPath: "transform.scale")
+        grow.fromValue = 1.0
+        grow.toValue = 1.3
+        grow.duration = 0.9
+        grow.autoreverses = true
+        grow.repeatCount = .infinity
+        grow.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        dot.add(grow, forKey: "breathe")
+
+        let expand = CABasicAnimation(keyPath: "transform.scale")
+        expand.fromValue = 1.0
+        expand.toValue = 1.55
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.8
+        fade.toValue = 0.1
+        let group = CAAnimationGroup()
+        group.animations = [expand, fade]
+        group.duration = 0.9
+        group.autoreverses = true
+        group.repeatCount = .infinity
+        group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        ring.add(group, forKey: "breathe")
+    }
+
+    override func layout() {
+        super.layout()
+        let c = CGPoint(x: bounds.midX, y: bounds.midY)
+        dot.bounds = CGRect(x: 0, y: 0, width: 7, height: 7)
+        ring.bounds = CGRect(x: 0, y: 0, width: 10, height: 10)
+        dot.position = c
+        ring.position = c
+        dot.backgroundColor = (appliedRunning == true
+            ? NSColor.systemGreen : NSColor.secondaryLabelColor.withAlphaComponent(0.5)).cgColor
+        ring.borderColor = NSColor.systemGreen.withAlphaComponent(0.55).cgColor
     }
 }
 

@@ -147,8 +147,18 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
+    /// 面板是否可见：呼吸灯等常驻动画只在可见时运行
+    /// （SwiftUI repeatForever 动画挂在 display link 上，面板隐藏后
+    ///  仍按刷新率求值，实测常驻 ~10% CPU）
+    @Published var popoverVisible = false
+
     func popoverDidOpen() {
+        popoverVisible = true
         refresh()
+    }
+
+    func popoverDidClose() {
+        popoverVisible = false
     }
 
     // MARK: - 设备
