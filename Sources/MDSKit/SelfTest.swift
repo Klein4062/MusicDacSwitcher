@@ -314,30 +314,11 @@ public func runSelfTest() {
         // 完全无 offset 信息 → 回退采样率最高
         let g = [f("/m/a.flac", 44100, nil), f("/m/b.flac", 96000, nil)]
         expect("无 offset 信息回退采样率最高", SourceProbe.pickPlaying(a: [], b: g)?.path == "/m/b.flac")
-        // offset 解析
-        expect("lsof offset \"0t548680\" 解析", SourceProbe.parseOffset("0t548680") == 548_680)
-        expect("lsof offset \"548680\" 解析", SourceProbe.parseOffset("548680") == 548_680)
-        expect("lsof offset \"0x10\" 拒绝", SourceProbe.parseOffset("0x10") == nil)
-        // lsof 输出解析：跳过写句柄（边下边播），保留读/读写句柄
-        let lsofText = """
-        p123
-        f91
-        ar
-        o0t1000
-        n/a/play.uc!
-        f100
-        aw
-        o0t5000000
-        n/a/download.uc!
-        f101
-        au
-        o0t2000
-        n/a/other.flac
-        """
-        let files = SourceProbe.parseLsofOutput(lsofText)
-        expect("lsof 解析跳过只写句柄（下载）",
-               files.count == 2 && !files.contains { $0.path == "/a/download.uc!" })
-        expect("lsof 解析保留读写句柄", files.contains { $0.path == "/a/other.flac" })
+        // fd 访问模式（内核 FREAD/FWRITE 标志）：纯写句柄 = 下载，不算播放
+        expect("只读句柄（FREAD）可播放", SourceProbe.isPlayableHandle(openFlags: 0x1))
+        expect("只写句柄（FWRITE，下载中）跳过", !SourceProbe.isPlayableHandle(openFlags: 0x2))
+        expect("读写句柄（FREAD|FWRITE）可播放", SourceProbe.isPlayableHandle(openFlags: 0x3))
+        expect("无访问标志时保守保留", SourceProbe.isPlayableHandle(openFlags: 0x0))
         // 空集
         expect("空扫描返回 nil", SourceProbe.pickPlaying(a: [], b: []) == nil)
     }

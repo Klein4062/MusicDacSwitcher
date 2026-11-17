@@ -12,10 +12,10 @@
 │  FormatMatcher.swift  匹配决策（纯函数，全部可自测）              │
 │  FormatController.swift  切换执行（写入 + 等待生效 + 校验）       │
 │  DeviceWriteGuard.swift  稳定期 + 掉线熔断（纯逻辑，可自测）      │
-│  SourceProbe.swift   源探测：lsof 扫描 + 文件头解析              │
+│  SourceProbe.swift   源探测：原生 fd 扫描 + 文件头解析            │
 │  Watcher.swift       调度中枢：监听属性 / 防抖 / 探测定时器       │
 │  Log.swift           日志 sink（CLI→stdout，GUI→面板）           │
-│  SelfTest.swift      内置自测（60 项）                           │
+│  SelfTest.swift      内置自测（59 项）                           │
 └──────────────────────────────────────────────────────────────────┘
         ▲                                        ▲
 Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
