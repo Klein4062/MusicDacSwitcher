@@ -45,6 +45,11 @@ public final class FormatController {
                         desiredRate: nominal, context: context)
     }
 
+    /// 注意：**不存在**「播放中温和切换」的安全路径。实测（索尼 Hi-Res 播放器）
+    /// 播放期间修改标称采样率同样会打断音频，甚至导致播放被加速：播放器已按
+    /// 当前设备率建立重采样/送数节奏，设备率中途变化后它仍按旧节奏送数据。
+    /// 因此所有写操作都必须在设备空闲时进行，见 DeviceWatcher 的 pending 机制。
+
     /// 把流切换到 desiredRate（可降级）下的最佳物理格式。
     /// 返回最终生效的格式描述（失败返回 nil）。
     @discardableResult
@@ -101,6 +106,25 @@ public final class FormatController {
             }
             log("⚠️ 设备不支持 \(hz(desiredRate)) → \(fallback.reason) · \(context)")
             targetRate = fallback.rate
+        }
+
+        // ── 快速路径：直接构造目标采样率下的完整格式，一次写入完成 ──
+        // 两步法会触发两次 USB 重新协商，脆弱设备在播放中可能经不起第二次；
+        // 若设备在该采样率下支持同样的位深组合，一次写入即可到位。
+        if current.mSampleRate != targetRate {
+            // 设备上报的物理格式列表通常已覆盖全部采样率，
+            // 可直接选出目标采样率下的完整格式，一次写入到位。
+            if let direct = FormatMatcher.select(targetRate: targetRate,
+                                                 targetBits: sourceBits,
+                                                 preferredChannels: channels,
+                                                 entries: currentEntries,
+                                                 policy: effectivePolicy),
+               abs(direct.asbd.mSampleRate - targetRate) < 0.5,
+               apply(streamID: streamID, asbd: direct.asbd,
+                     note: "单步直接切换 · \(direct.reason)", context: context) {
+                return AudioDevice.streamPhysicalFormat(streamID)
+            }
+            logV("单步直接切换未生效，回退两步法 · \(context)")
         }
 
         // ── 第 1 步：必要时先切采样率（位深沿用当前模板）──
@@ -168,11 +192,11 @@ public final class FormatController {
             // 否则后续枚举/回读会拿到旧采样率下的信息
             if waitForFormat(streamID: streamID, target: asbd, timeoutMS: 800) {
                 log("已切换 → \(describe(asbd)) （\(note)）· \(context)")
-            } else {
-                let actual = AudioDevice.streamPhysicalFormat(streamID).map(describe) ?? "?"
-                log("已提交 \(describe(asbd))，但等待生效超时（当前 \(actual)）· \(context)")
+                return true
             }
-            return true
+            let actual = AudioDevice.streamPhysicalFormat(streamID).map(describe) ?? "?"
+            log("已提交 \(describe(asbd))，但等待生效超时（当前 \(actual)）· \(context)")
+            return false
         } catch {
             log("切换失败：\(error) · 目标 \(describe(asbd)) · \(context)")
             return false
@@ -194,11 +218,14 @@ public final class FormatController {
     }
 
     /// 用虚拟格式范围 + 当前采样率下的实体条目，拼出覆盖全部采样率的候选集合
+    /// - Parameter includeDiscrete: 为 true 时也把离散采样率（min == max）合成模板条目，
+    ///   用于「一次写入目标格式」的快速路径
     private func collectAllRates(from ranges: [(min: Float64, max: Float64)],
-                                 entriesAtCurrentRate: [PhysicalFormatEntry]) -> [PhysicalFormatEntry] {
+                                 entriesAtCurrentRate: [PhysicalFormatEntry],
+                                 includeDiscrete: Bool = false) -> [PhysicalFormatEntry] {
         var result = entriesAtCurrentRate
-        for r in ranges where r.min != r.max {
-            // 连续区间：构造占位条目（位深集合沿用当前，仅用于采样率决策）
+        for r in ranges where includeDiscrete || r.min != r.max {
+            // 构造占位条目（位深集合沿用当前，仅用于采样率/位深决策）
             if let template = entriesAtCurrentRate.first {
                 var e = template
                 e.rateMin = r.min

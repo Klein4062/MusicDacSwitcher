@@ -67,6 +67,9 @@ public final class DeviceWatcher {
     public var writeFaultWindow: Double = 20
     /// 连续故障次数达到该值 → 进入稳定（只读）模式
     public var faultThreshold = 2
+    /// 起播稳定期（秒）：播放刚开始时播放器自己也在配置设备，
+    /// 此时再写格式容易冲突导致设备复位，先等播放器配置完成
+    public var playbackSettleSeconds: Double = 3
     /// 稳定模式变化回调（GUI 显示徽章/警告）
     public var onPassiveChange: ((Bool) -> Void)?
 
@@ -87,6 +90,19 @@ public final class DeviceWatcher {
     private var writeGuard = DeviceWriteGuard()
     /// 当前绑定的设备 UID（用于检测设备是否从系统消失）
     private var boundUID: String?
+    /// 上一次观测到的播放状态（用于识别「起播」时刻）
+    private var lastRunning = false
+    /// 起播稳定期截止时间
+    private var playSettleUntil = Date.distantPast
+    /// 设备开始空闲（无任何音频 IO）的时刻
+    private var idleSince = Date()
+    /// 播放中探测到、但尚不能应用的目标采样率（播放中禁止写设备）
+    private var pendingRate: Float64?
+    /// 待应用目标的来源描述（日志用）
+    private var pendingSource: String?
+    /// 设备连续空闲多少秒后才允许在空闲期写格式：
+    /// 播放列表切歌的间隙很短，此时写格式可能与下一曲起播抢设备
+    private let idleApplyDelay: Double = 4
 
     public init(deviceQuery: String?, controller: FormatController, restoreRate: Float64? = nil,
                 probeEnabled: Bool = true, probeInterval: Double = 4) {
@@ -226,11 +242,39 @@ public final class DeviceWatcher {
     private func deviceStillPresent() -> Bool {
         guard let uid = boundUID else { return true }
         if AudioDevice.findDevice(matching: uid) != nil { return true }
+        log("⚠️ 设备已从系统消失（uid=\(uid)）")
         noteDeviceVanished()
         currentDevice = 0
         boundUID = nil
         scheduleRebind(reason: "设备消失")
         return false
+    }
+
+    /// 观测播放状态并维护起播稳定期；返回设备当前是否在播放
+    private func observeRunning() -> Bool {
+        let running = AudioDevice.isRunningSomewhere(currentDevice)
+        if running && !lastRunning {
+            // 起播瞬间：播放器自己也在配置设备，先让位几秒
+            playSettleUntil = Date().addingTimeInterval(playbackSettleSeconds)
+            controller.logV("起播稳定期 \(Int(playbackSettleSeconds))s：期间不修改格式")
+        }
+        if !running && lastRunning {
+            // 记录真正开始空闲的时刻：只有持续空闲足够久才能确定
+            // 不是切歌间隙，此时写设备才是安全的
+            idleSince = Date()
+        }
+        lastRunning = running
+        return running
+    }
+
+    /// 综合写入许可：绑定稳定期 + 起播稳定期 + 熔断
+    private func canWriteNow() -> Bool {
+        guard writeGuard.canWrite(at: Date()) else { return false }
+        if Date() < playSettleUntil {
+            controller.logV("起播稳定期内，不修改格式")
+            return false
+        }
+        return true
     }
 
     /// 调用控制器切换，并记录「确实改动了格式」的时间（熔断判定依据）
@@ -287,15 +331,16 @@ public final class DeviceWatcher {
         guard !stopped, probeEnabled, currentDevice != 0 else { return }
         guard controller.enabled else { return }
         guard deviceStillPresent() else { return }
-        // 稳定（只读）模式 / 设备刚绑定的稳定期：不写格式
-        guard writeGuard.canWrite(at: Date()) else { return }
-        guard AudioDevice.isRunningSomewhere(currentDevice) else {
+        let running = observeRunning()
+        guard running else {
             // 无播放：清除探测状态，处理空闲恢复
             if lastProbeKey != nil { lastProbeKey = nil }
             nilStreak = 0
             handleIdleRestore()
             return
         }
+        // 稳定（只读）模式 / 绑定稳定期 / 起播稳定期：不写格式
+        guard canWriteNow() else { return }
         if let hog = AudioDevice.hogPID(currentDevice), hog != -1 {
             return // 播放器独占（hog），由播放器自行管理格式
         }
@@ -343,31 +388,37 @@ public final class DeviceWatcher {
             controller.logV("源探测被手动切换抑制：\(best)")
             return
         }
-        guard let streamID = AudioDevice.outputStreams(currentDevice).first else { return }
-        // 幂等：同一文件且设备仍处于匹配格式才跳过。
-        // （设备被外部/手动改走、或上次应用失败时，即使文件未变也重新纠正）
-        if best.key == lastProbeKey, deviceMatches(best, streamID: streamID) { return }
+        // 幂等：同一文件且标称采样率已匹配则跳过
+        if best.key == lastProbeKey, rateMatches(best.sampleRate) { return }
         lastProbeKey = best.key
-        applyWatched(deviceID: currentDevice,
-                     streamID: streamID,
-                     desiredRate: best.sampleRate,
-                     sourceBits: best.bitsPerSample,
-                     channels: best.channels ?? 2,
-                     context: "源探测 \(best)")
-        onEvent?("源探测")
+        // 播放中绝不写设备，连标称采样率也不能改。
+        //
+        // 实测（索尼 Hi-Res 播放器）：播放器在起播时按当时的设备率建立
+        // 重采样/送数节奏，播放中途改设备率会让它继续按旧节奏送数据，
+        // 表现为音频被中断，或恢复后播放速度/音高异常（被加速）。
+        // 因此这里只登记目标格式，等设备持续空闲（暂停/停止）时再应用。
+        if rateMatches(best.sampleRate) {
+            if pendingRate != nil {
+                controller.logV("设备采样率已匹配 \(hz(best.sampleRate))，取消待切换")
+            }
+            pendingRate = nil
+            pendingSource = nil
+            return
+        }
+        let current = AudioDevice.nominalRate(currentDevice).map(hz) ?? "?"
+        if pendingRate != best.sampleRate {
+            log("播放中源为 \(hz(best.sampleRate))，设备当前 \(current)："
+                + "为避免打断播放/变速，暂停或停止播放后自动切换")
+        }
+        pendingRate = best.sampleRate
+        pendingSource = best.key
+        onEvent?("源探测（待切换）")
     }
 
-    /// 设备当前物理格式是否已与探测结果匹配（采样率一致；位深按策略）
-    private func deviceMatches(_ p: SourceProbe.Probe, streamID: AudioObjectID) -> Bool {
-        guard let cur = AudioDevice.streamPhysicalFormat(streamID) else { return false }
-        guard abs(cur.mSampleRate - p.sampleRate) < 0.5 else { return false }
-        guard let bits = p.bitsPerSample else { return true }
-        if Int(cur.mBitsPerChannel) == bits { return true }
-        // 位深不一致：若策略本就不要求匹配源位深，视为匹配
-        switch controller.policy {
-        case .highest, .fixed: return true
-        case .match: return false
-        }
+    /// 设备标称采样率是否已与探测结果匹配
+    private func rateMatches(_ rate: Float64) -> Bool {
+        guard let cur = AudioDevice.nominalRate(currentDevice) else { return false }
+        return abs(cur - rate) < 0.5
     }
 
     private func evaluateNow(context: String) {
@@ -378,54 +429,64 @@ public final class DeviceWatcher {
             rebind(reason: "设备已失效 · \(context)")
             return
         }
-        // 稳定（只读）模式 / 刚绑定稳定期：不写设备
-        guard writeGuard.canWrite(at: Date()) else {
-            controller.logV(writeGuard.passive
-                            ? "稳定模式：跳过格式评估 · \(context)"
-                            : "设备稳定期内，跳过格式评估 · \(context)")
-            return
-        }
         // 设备空闲（无音频 IO）时不写格式：仅在真正播放时切换。
         // 这样「在系统设置里把输出切到 DAC」这类操作不会被软件顺手改格式，
         // 对脆弱的 USB 设备尤其重要（改格式会触发带宽重新协商）。
-        guard AudioDevice.isRunningSomewhere(currentDevice) else {
+        guard observeRunning() else {
             controller.logV("设备空闲，不修改格式 · \(context)")
             return
         }
-        // 源探测近期已决策（3 个探测周期内）：由探测主导，避免与 nominal 路径抖动
-        if let d = lastProbeDate, Date().timeIntervalSince(d) < max(probeInterval, 1.5) * 3 {
-            controller.logV("由源探测主导，跳过 nominal 评估 · \(context)")
+        // 稳定（只读）模式 / 绑定稳定期 / 起播稳定期：不写设备
+        guard canWriteNow() else {
+            controller.logV(writeGuard.passive
+                            ? "稳定模式：跳过格式评估 · \(context)"
+                            : "稳定期内，跳过格式评估 · \(context)")
             return
         }
-        let streamID = AudioDevice.outputStreams(currentDevice).first
-        let before = streamID.flatMap { AudioDevice.streamPhysicalFormat($0) }
-        controller.evaluateAndApply(deviceID: currentDevice, context: context)
-        if let streamID, let before,
-           let after = AudioDevice.streamPhysicalFormat(streamID), !sameFormat(before, after) {
-            writeGuard.noteWrite(at: Date())
-        }
+        // 播放中不改物理格式：多数播放器（含索尼 Hi-Res）在流式输出时
+        // 物理格式被改会直接中断音频；采样率跟随统一走源探测的温和路径。
+        controller.logV("播放中不改物理格式（避免中断播放器）· \(context)")
     }
 
-    /// 空闲恢复：设备无任何 IO 持续 ~3 秒后，切回 restoreRate 的最佳格式
+    /// 空闲应用：设备持续空闲时，把「播放中登记的目标格式」写进去
+    /// （没有目标时按 restoreRate 恢复）。
+    ///
+    /// 写设备只在空闲期做：播放中写会让播放器送数节奏与设备率失配，
+    /// 轻则中断播放，重则播放被加速。切歌间隙通常只有一两秒，
+    /// 因此要求连续空闲 ≥ idleApplyDelay 秒，避免与下一曲起播抢设备。
     private func handleIdleRestore() {
         restoreWork?.cancel()
         restoreWork = nil
-        guard let rate = restoreRate, currentDevice != 0 else { return }
+        guard currentDevice != 0 else { return }
+        guard let pending = pendingRate ?? restoreRate else { return }
         guard !AudioDevice.isRunningSomewhere(currentDevice) else { return }
+        let isPending = pendingRate != nil
+        let source = pendingSource
+        // 还没空闲够久（可能只是切歌间隙）：等到满足条件的那一刻再试
+        let wait = max(0.05, idleApplyDelay - Date().timeIntervalSince(idleSince))
 
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.currentDevice != 0 else { return }
             guard self.writeGuard.canWrite(at: Date()) else { return }
             guard self.deviceStillPresent() else { return }
+            // 空闲判定是异步的：真正写之前再确认一次
             guard !AudioDevice.isRunningSomewhere(self.currentDevice) else { return }
+            guard Date().timeIntervalSince(self.idleSince) >= self.idleApplyDelay else { return }
             if let hog = AudioDevice.hogPID(self.currentDevice), hog != -1 { return }
             guard let streamID = AudioDevice.outputStreams(self.currentDevice).first else { return }
             self.applyWatched(deviceID: self.currentDevice,
                               streamID: streamID,
-                              desiredRate: rate,
-                              context: "空闲恢复")
+                              desiredRate: pending,
+                              context: isPending
+                                  ? "空闲应用（上次播放源 \(source ?? hz(pending))）"
+                                  : "空闲恢复")
+            // 目标已尝试应用（成功与否都以设备回读为准），清除待办
+            if self.pendingRate == pending {
+                self.pendingRate = nil
+                self.pendingSource = nil
+            }
         }
         restoreWork = item
-        queue.asyncAfter(deadline: .now() + 3.0, execute: item)
+        queue.asyncAfter(deadline: .now() + wait, execute: item)
     }
 }

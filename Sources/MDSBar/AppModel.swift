@@ -124,10 +124,12 @@ final class AppModel: ObservableObject {
                 guard self.logFlush == nil else { return }
                 let work = DispatchWorkItem { [weak self] in
                     guard let self else { return }
-                    self.logs.append(contentsOf: self.pendingLogs)
+                    let batch = self.pendingLogs
                     self.pendingLogs.removeAll()
                     self.logFlush = nil
+                    self.logs.append(contentsOf: batch)
                     if self.logs.count > 300 { self.logs.removeFirst(self.logs.count - 300) }
+                    self.appendFileLog(batch)
                 }
                 self.logFlush = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
@@ -172,6 +174,26 @@ final class AppModel: ObservableObject {
     /// 解除稳定模式（用户确认设备已稳定后）
     func resetPassiveMode() {
         watcher?.resetPassive()
+    }
+
+    /// 日志落盘（~/Library/Logs/MusicDacSwitcher.log）：用于排查设备掉线等现场问题
+    private func appendFileLog(_ lines: [String]) {
+        guard !lines.isEmpty else { return }
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs")
+        let url = dir.appendingPathComponent("MusicDacSwitcher.log")
+        if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber,
+           size.intValue > 2_000_000 {
+            try? "".write(to: url, atomically: true, encoding: .utf8) // 超过 2MB 从头记录
+        }
+        let text = lines.joined(separator: "\n") + "\n"
+        if let fh = try? FileHandle(forWritingTo: url) {
+            fh.seekToEndOfFile()
+            fh.write(Data(text.utf8))
+            try? fh.close()
+        } else {
+            try? Data(text.utf8).write(to: url)
+        }
     }
 
     /// watcher 事件触发的 UI 刷新：0.4s 合并。
@@ -257,8 +279,9 @@ final class AppModel: ObservableObject {
     }
 
     /// 能力列表 → 按采样率分组的矩阵行（降序）
-    static func group(_ entries: [PhysicalFormatEntry],
-                      current: AudioStreamBasicDescription?) -> [RateRow] {
+    /// nonisolated：后台线程刷新时也要调用
+    nonisolated static func group(_ entries: [PhysicalFormatEntry],
+                                  current: AudioStreamBasicDescription?) -> [RateRow] {
         struct Key: Hashable { let min: Float64; let max: Float64 }
         var groups: [Key: (ints: Set<Int>, floats: Set<Int>)] = [:]
         var order: [Key] = []
@@ -299,11 +322,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 立即按当前标称采样率优化位深
+    /// 立即优化格式（仅在设备空闲时执行）
     func optimizeNow() {
         guard let id = currentDeviceID else { return }
+        guard !AudioDevice.isRunningSomewhere(id) else {
+            // 播放中改设备格式（哪怕只是标称采样率）会打乱播放器已建立的
+            // 送数节奏，实测会导致音频中断或播放被加速，因此只提示不执行
+            log("播放中不修改设备格式（避免打断播放或变速）；暂停/停止播放后会自动应用，也可届时点「立即优化」")
+            return
+        }
         Task.detached { [controller] in
-            controller.evaluateAndApply(deviceID: id, context: "手动优化")
+            controller.evaluateAndApply(deviceID: id, context: "手动优化（空闲，完整）")
             await MainActor.run { self.refresh(includeDevices: false) }
         }
     }
