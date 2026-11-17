@@ -108,21 +108,23 @@ struct HeaderCard: View {
     }
 }
 
-/// 播放中呼吸圆点（TimelineView 驱动，无需 @State）
+/// 播放中呼吸圆点：repeatForever 动画由 Core Animation 驱动，
+/// 不逐帧重算 SwiftUI body（TimelineView 方案会以 16fps 重绘整棵树）
 struct RunningDot: View {
     var running: Bool
 
     var body: some View {
         HStack(spacing: 4) {
-            TimelineView(.periodic(from: .now, by: 0.06)) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate
-                let wave = 0.5 + 0.5 * sin(t * 2 * .pi / 1.8) // 1.8s 周期
+            ZStack {
                 Circle()
                     .fill(running ? Color.green : Color.secondary.opacity(0.5))
                     .frame(width: 7, height: 7)
-                    .scaleEffect(running ? 1.0 + 0.4 * wave : 1.0)
-                    .shadow(color: running ? .green.opacity(0.9) : .clear,
-                            radius: running ? 2 + 3 * wave : 0)
+                    .scaleEffect(running ? 1.35 : 1.0)
+                    .shadow(color: running ? .green.opacity(0.75) : .clear, radius: 3)
+                    .animation(running
+                               ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+                               : .easeOut(duration: 0.2),
+                               value: running)
             }
             .frame(width: 10, height: 10)
             Text(running ? "播放中" : "空闲")
@@ -177,6 +179,33 @@ struct AutoSwitchCard: View {
                         .toggleStyle(.switch)
                         .controlSize(.mini)
                         .labelsHidden()
+                }
+
+                // 稳定模式：设备曾在切换格式后掉线 → 停止自动写格式
+                if model.passiveMode {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.orange)
+                            Text("检测到切换格式后设备掉线，已停止自动修改格式以保持设备连接。"
+                                 + "确认设备稳定后可重新启用。")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Button {
+                            model.resetPassiveMode()
+                        } label: {
+                            Label("重新启用自动切换", systemImage: "arrow.counterclockwise")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.10)))
                 }
 
                 Picker("位深", selection: $model.bitDepthMode) {

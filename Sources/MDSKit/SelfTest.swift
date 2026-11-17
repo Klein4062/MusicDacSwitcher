@@ -222,6 +222,57 @@ public func runSelfTest() {
         expect("空扫描返回 nil", SourceProbe.pickPlaying(a: [], b: []) == nil)
     }
 
+    // 设备写入保护：稳定期 + 写后掉线熔断
+    do {
+        let t0 = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        var g = DeviceWriteGuard(settleSeconds: 8, faultWindow: 20, faultThreshold: 2, now: t0)
+        expect("刚绑定：稳定期内不允许写设备", !g.canWrite(at: t0 + 1))
+        expect("刚绑定：稳定期结束前仍不允许写", !g.canWrite(at: t0 + 7.9))
+        expect("稳定期结束后允许写设备", g.canWrite(at: t0 + 8))
+
+        // 场景1：写入后 5 秒设备消失 → 第 1 次故障，尚未熔断
+        g.noteWrite(at: t0 + 10)
+        let entered1 = g.noteVanished(at: t0 + 15)
+        expect("写入后 5s 掉线记为故障", g.faults == 1)
+        expect("首次故障不进入稳定模式", !entered1 && !g.passive && g.canWrite(at: t0 + 16))
+
+        // 场景2：再次写入后 3 秒设备消失 → 达到阈值，进入稳定模式
+        g.noteWrite(at: t0 + 20)
+        let entered2 = g.noteVanished(at: t0 + 23)
+        expect("第二次切换后掉线进入稳定模式", entered2 && g.passive)
+        expect("稳定模式禁止写设备", !g.canWrite(at: t0 + 100))
+
+        // 场景3：设备多次消失不重复归咎（一次写入只记一次）
+        let before = g.faults
+        _ = g.noteVanished(at: t0 + 24)
+        expect("同一次写入只归咎一次", g.faults == before)
+
+        // 场景4：用户解除 → 清空故障并重新进入稳定期
+        g.reset(at: t0 + 30)
+        expect("解除稳定模式后恢复写权限（稳定期后）", !g.passive && g.canWrite(at: t0 + 38))
+        expect("解除后稳定期内仍不可写", !g.canWrite(at: t0 + 35))
+        expect("解除后故障计数清零", g.faults == 0)
+
+        // 场景5：写入后很久才消失（超出熔断窗口）→ 不归咎
+        var g2 = DeviceWriteGuard(settleSeconds: 8, faultWindow: 20, faultThreshold: 2, now: t0)
+        g2.noteWrite(at: t0 + 10)
+        _ = g2.noteVanished(at: t0 + 31) // 21s 后，超窗口
+        expect("超出熔断窗口的掉线不归咎于切换", g2.faults == 0 && !g2.passive)
+
+        // 场景6：从未写入过就消失（USB 自身接触不良）→ 不归咎
+        var g3 = DeviceWriteGuard(settleSeconds: 8, faultWindow: 20, faultThreshold: 2, now: t0)
+        _ = g3.noteVanished(at: t0 + 12)
+        expect("未写入格式时掉线不归咎（硬件自身问题）", g3.faults == 0 && !g3.passive)
+
+        // 场景7：默认阈值下需连续两次才熔断
+        var g4 = DeviceWriteGuard(now: t0)
+        g4.noteWrite(at: t0 + 10)
+        _ = g4.noteVanished(at: t0 + 12)
+        g4.noteWrite(at: t0 + 20)
+        _ = g4.noteVanished(at: t0 + 22)
+        expect("默认阈值：连续两次切换后掉线才熔断", g4.passive)
+    }
+
     print()
     print("结果: \(passCount) 通过, \(failCount) 失败")
     if failCount > 0 { exit(1) }

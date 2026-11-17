@@ -60,6 +60,15 @@ public final class DeviceWatcher {
     public var probeInterval: Double = 4
     /// 源探测开关（GUI 可切换）
     public var probeEnabled = true
+    /// 设备（重新）绑定后的稳定期（秒）：期间不修改设备格式。
+    /// USB DAC 刚枚举完成时立即改格式，部分设备会因带宽重新协商失败而掉线。
+    public var settleSeconds: Double = 8
+    /// 熔断窗口（秒）：写入格式后设备在此窗口内消失，判定为「切换导致掉线」
+    public var writeFaultWindow: Double = 20
+    /// 连续故障次数达到该值 → 进入稳定（只读）模式
+    public var faultThreshold = 2
+    /// 稳定模式变化回调（GUI 显示徽章/警告）
+    public var onPassiveChange: ((Bool) -> Void)?
 
     private let queue = DispatchQueue(label: "mds.watch")
     private var listeners: [PropertyListener] = []
@@ -72,7 +81,12 @@ public final class DeviceWatcher {
     private var manualOverrideDeadline = Date.distantPast
     private var probeBusy = false
     private var nilStreak = 0
+    private var rebindDebounce: DispatchWorkItem?
     private var stopped = false
+    /// 稳定期 + 写后掉线熔断（纯逻辑，自测覆盖）
+    private var writeGuard = DeviceWriteGuard()
+    /// 当前绑定的设备 UID（用于检测设备是否从系统消失）
+    private var boundUID: String?
 
     public init(deviceQuery: String?, controller: FormatController, restoreRate: Float64? = nil,
                 probeEnabled: Bool = true, probeInterval: Double = 4) {
@@ -87,6 +101,9 @@ public final class DeviceWatcher {
         queue.async { [weak self] in
             guard let self else { return }
             self.stopped = false
+            self.writeGuard = DeviceWriteGuard(settleSeconds: self.settleSeconds,
+                                               faultWindow: self.writeFaultWindow,
+                                               faultThreshold: self.faultThreshold)
             self.rebind(reason: "启动")
             self.startProbeTimer()
         }
@@ -111,6 +128,16 @@ public final class DeviceWatcher {
         queue.async { self.manualOverrideDeadline = Date().addingTimeInterval(seconds) }
     }
 
+    /// 解除稳定模式，恢复自动修改格式（GUI「重新启用」）
+    public func resetPassive() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.writeGuard.reset(at: Date())
+            self.onPassiveChange?(false)
+            log("稳定模式已解除 · \(Int(self.settleSeconds)) 秒稳定期后恢复自动切换")
+        }
+    }
+
     private func startProbeTimer() {
         probeTimer?.cancel()
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -127,6 +154,12 @@ public final class DeviceWatcher {
         listeners.removeAll()
         currentDevice = 0
 
+        // 之前绑定的设备若已从系统消失：若发生在写入格式后不久，记一次故障
+        if let uid = boundUID, AudioDevice.findDevice(matching: uid) == nil {
+            noteDeviceVanished()
+        }
+        boundUID = nil
+
         guard !stopped else { return }
         guard let deviceID = AudioDevice.findDevice(matching: deviceQuery) else {
             log("未找到匹配的输出设备（\(deviceQuery ?? "默认")），5 秒后重试 · \(reason)")
@@ -137,10 +170,15 @@ public final class DeviceWatcher {
         }
         currentDevice = deviceID
         let snap = AudioDevice.snapshot(deviceID: deviceID)
+        boundUID = snap.uid
+        // 稳定期：设备刚（重新）出现/刚成为默认输出，先不做任何写操作，
+        // 给 USB 枚举、时钟同步留出时间
+        writeGuard.noteBound(at: Date())
         log("监听设备：「\(snap.name)」 uid=\(snap.uid) · nominal=\(snap.nominalRate.map(hz) ?? "?") · \(reason)")
         if let cur = snap.streams.first?.physical {
             log("  当前格式：\(describe(cur))")
         }
+        controller.logV("稳定期 \(Int(settleSeconds))s：期间不修改格式")
 
         // 设备级监听
         if let l = PropertyListener(objectID: deviceID, selector: kAudioDevicePropertyNominalSampleRate,
@@ -163,12 +201,67 @@ public final class DeviceWatcher {
            let l = PropertyListener(objectID: AudioObjectID(kAudioObjectSystemObject),
                                     selector: kAudioHardwarePropertyDefaultOutputDevice,
                                     handler: { [weak self] in
-                                        self?.queue.async { self?.rebind(reason: "默认输出设备变化") }
+                                        self?.scheduleRebind(reason: "默认输出设备变化")
                                     }) {
             listeners.append(l)
         }
 
         scheduleEvaluate("初始评估")
+    }
+
+    /// 设备在写入格式后不久从系统消失 → 记一次故障；
+    /// 连续达到阈值即进入稳定（只读）模式，不再把设备打掉
+    private func noteDeviceVanished() {
+        let faultsBefore = writeGuard.faults
+        if writeGuard.noteVanished(at: Date()) {
+            log("⚠️ 格式切换后设备掉线（第 \(writeGuard.faults) 次）→ 已进入稳定模式：不再自动修改设备格式。"
+                + "如需恢复，请在面板中点「重新启用自动切换」。")
+            onPassiveChange?(true)
+        } else if writeGuard.faults > faultsBefore {
+            log("⚠️ 格式切换后设备掉线（第 \(writeGuard.faults) 次），继续观察")
+        }
+    }
+
+    /// 每次轮询检查已绑定设备是否仍在系统中；消失则触发重绑
+    private func deviceStillPresent() -> Bool {
+        guard let uid = boundUID else { return true }
+        if AudioDevice.findDevice(matching: uid) != nil { return true }
+        noteDeviceVanished()
+        currentDevice = 0
+        boundUID = nil
+        scheduleRebind(reason: "设备消失")
+        return false
+    }
+
+    /// 调用控制器切换，并记录「确实改动了格式」的时间（熔断判定依据）
+    private func applyWatched(deviceID: AudioObjectID,
+                              streamID: AudioObjectID,
+                              desiredRate: Float64,
+                              sourceBits: Int? = nil,
+                              channels: Int? = 2,
+                              context: String) {
+        let before = AudioDevice.streamPhysicalFormat(streamID)
+        controller.applyBestFormat(deviceID: deviceID, streamID: streamID,
+                                   desiredRate: desiredRate,
+                                   sourceBits: sourceBits,
+                                   channels: channels,
+                                   context: context)
+        let after = AudioDevice.streamPhysicalFormat(streamID)
+        if let before, let after, !sameFormat(before, after) {
+            writeGuard.noteWrite(at: Date())
+        }
+    }
+
+    /// 默认输出设备变化（防抖 0.5s 合并）：设备反复插拔时事件可达每秒
+    /// 数十条，直接全量 rebind 会风暴
+    private func scheduleRebind(reason: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.rebindDebounce?.cancel()
+            let item = DispatchWorkItem { [weak self] in self?.rebind(reason: reason) }
+            self.rebindDebounce = item
+            self.queue.asyncAfter(deadline: .now() + 0.5, execute: item)
+        }
     }
 
     // MARK: - 评估调度
@@ -193,6 +286,9 @@ public final class DeviceWatcher {
     private func probeTick() {
         guard !stopped, probeEnabled, currentDevice != 0 else { return }
         guard controller.enabled else { return }
+        guard deviceStillPresent() else { return }
+        // 稳定（只读）模式 / 设备刚绑定的稳定期：不写格式
+        guard writeGuard.canWrite(at: Date()) else { return }
         guard AudioDevice.isRunningSomewhere(currentDevice) else {
             // 无播放：清除探测状态，处理空闲恢复
             if lastProbeKey != nil { lastProbeKey = nil }
@@ -252,12 +348,12 @@ public final class DeviceWatcher {
         // （设备被外部/手动改走、或上次应用失败时，即使文件未变也重新纠正）
         if best.key == lastProbeKey, deviceMatches(best, streamID: streamID) { return }
         lastProbeKey = best.key
-        controller.applyBestFormat(deviceID: currentDevice,
-                                   streamID: streamID,
-                                   desiredRate: best.sampleRate,
-                                   sourceBits: best.bitsPerSample,
-                                   channels: best.channels ?? 2,
-                                   context: "源探测 \(best)")
+        applyWatched(deviceID: currentDevice,
+                     streamID: streamID,
+                     desiredRate: best.sampleRate,
+                     sourceBits: best.bitsPerSample,
+                     channels: best.channels ?? 2,
+                     context: "源探测 \(best)")
         onEvent?("源探测")
     }
 
@@ -276,9 +372,24 @@ public final class DeviceWatcher {
 
     private func evaluateNow(context: String) {
         guard currentDevice != 0 else { return }
+        guard deviceStillPresent() else { return }
         guard AudioDevice.findDevice(matching: deviceQuery) == currentDevice
             || (deviceQuery == nil && AudioDevice.defaultOutputDeviceID() == currentDevice) else {
             rebind(reason: "设备已失效 · \(context)")
+            return
+        }
+        // 稳定（只读）模式 / 刚绑定稳定期：不写设备
+        guard writeGuard.canWrite(at: Date()) else {
+            controller.logV(writeGuard.passive
+                            ? "稳定模式：跳过格式评估 · \(context)"
+                            : "设备稳定期内，跳过格式评估 · \(context)")
+            return
+        }
+        // 设备空闲（无音频 IO）时不写格式：仅在真正播放时切换。
+        // 这样「在系统设置里把输出切到 DAC」这类操作不会被软件顺手改格式，
+        // 对脆弱的 USB 设备尤其重要（改格式会触发带宽重新协商）。
+        guard AudioDevice.isRunningSomewhere(currentDevice) else {
+            controller.logV("设备空闲，不修改格式 · \(context)")
             return
         }
         // 源探测近期已决策（3 个探测周期内）：由探测主导，避免与 nominal 路径抖动
@@ -286,7 +397,13 @@ public final class DeviceWatcher {
             controller.logV("由源探测主导，跳过 nominal 评估 · \(context)")
             return
         }
+        let streamID = AudioDevice.outputStreams(currentDevice).first
+        let before = streamID.flatMap { AudioDevice.streamPhysicalFormat($0) }
         controller.evaluateAndApply(deviceID: currentDevice, context: context)
+        if let streamID, let before,
+           let after = AudioDevice.streamPhysicalFormat(streamID), !sameFormat(before, after) {
+            writeGuard.noteWrite(at: Date())
+        }
     }
 
     /// 空闲恢复：设备无任何 IO 持续 ~3 秒后，切回 restoreRate 的最佳格式
@@ -298,13 +415,15 @@ public final class DeviceWatcher {
 
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.currentDevice != 0 else { return }
+            guard self.writeGuard.canWrite(at: Date()) else { return }
+            guard self.deviceStillPresent() else { return }
             guard !AudioDevice.isRunningSomewhere(self.currentDevice) else { return }
             if let hog = AudioDevice.hogPID(self.currentDevice), hog != -1 { return }
             guard let streamID = AudioDevice.outputStreams(self.currentDevice).first else { return }
-            self.controller.applyBestFormat(deviceID: self.currentDevice,
-                                            streamID: streamID,
-                                            desiredRate: rate,
-                                            context: "空闲恢复")
+            self.applyWatched(deviceID: self.currentDevice,
+                              streamID: streamID,
+                              desiredRate: rate,
+                              context: "空闲恢复")
         }
         restoreWork = item
         queue.asyncAfter(deadline: .now() + 3.0, execute: item)

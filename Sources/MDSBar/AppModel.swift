@@ -37,6 +37,8 @@ final class AppModel: ObservableObject {
     @Published var probeEnabled = true {
         didSet { watcher?.probeEnabled = probeEnabled }
     }
+    /// 稳定模式：检测到「切换格式后设备掉线」时自动进入，停止写设备
+    @Published var passiveMode = false
     @Published var bitDepthMode: BitDepthMode = .highest {
         didSet { controller.policy = bitDepthMode.policy }
     }
@@ -88,7 +90,7 @@ final class AppModel: ObservableObject {
 
     // MARK: - 格式矩阵行
 
-    struct RateRow: Identifiable {
+    struct RateRow: Identifiable, Equatable {
         var id: Float64 { rate }
         var rate: Float64
         var label: String
@@ -103,6 +105,11 @@ final class AppModel: ObservableObject {
     let controller = FormatController(policy: .highest, verbose: true)
     private var watcher: DeviceWatcher?
     private var timer: Timer?
+    private var pendingLogs: [String] = []
+    private var logFlush: DispatchWorkItem?
+    private var refreshing = false
+    private var refreshAgain = false
+    private var uiRefreshDebounce: DispatchWorkItem?
 
     // MARK: - 生命周期
 
@@ -110,10 +117,20 @@ final class AppModel: ObservableObject {
         // init 内赋值不触发 didSet，不会写回持久化
         selectedUID = UserDefaults.standard.string(forKey: "mds.selectedDeviceUID")
         LogSink.handler = { [weak self] line in
+            // 批量合并（0.5s）：事件风暴时不逐条打爆主线程
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.logs.append(line)
-                if self.logs.count > 300 { self.logs.removeFirst(self.logs.count - 300) }
+                self.pendingLogs.append(line)
+                guard self.logFlush == nil else { return }
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.logs.append(contentsOf: self.pendingLogs)
+                    self.pendingLogs.removeAll()
+                    self.logFlush = nil
+                    if self.logs.count > 300 { self.logs.removeFirst(self.logs.count - 300) }
+                }
+                self.logFlush = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
             }
         }
     }
@@ -142,12 +159,31 @@ final class AppModel: ObservableObject {
 
     private func rebuildWatcher() {
         watcher?.stop()
+        passiveMode = false // 新 watcher 从正常模式开始
         let w = DeviceWatcher(deviceQuery: selectedUID, controller: controller)
-        w.onEvent = { [weak self] _ in
-            DispatchQueue.main.async { self?.refresh(includeDevices: false) }
+        w.onEvent = { [weak self] _ in self?.scheduleUIRefresh() }
+        w.onPassiveChange = { [weak self] on in
+            DispatchQueue.main.async { self?.passiveMode = on }
         }
         watcher = w
         w.start()
+    }
+
+    /// 解除稳定模式（用户确认设备已稳定后）
+    func resetPassiveMode() {
+        watcher?.resetPassive()
+    }
+
+    /// watcher 事件触发的 UI 刷新：0.4s 合并。
+    /// 设备反复插拔时事件可达每秒数十条，逐条直刷主线程会把 UI 打死。
+    func scheduleUIRefresh() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.uiRefreshDebounce?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.refresh(includeDevices: false) }
+            self.uiRefreshDebounce = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+        }
     }
 
     private var currentDeviceID: AudioObjectID? {
@@ -162,32 +198,62 @@ final class AppModel: ObservableObject {
 
     // MARK: - 刷新
 
+    /// CoreAudio 查询全部在后台线程执行（设备抖动时 IPC 往返可能很慢，
+    /// 放主线程会冻结 UI）；主线程只写 @Published。防重入，堆积的请求合并续刷。
     func refresh(includeDevices: Bool = true) {
-        guard let id = currentDeviceID else {
-            deviceName = "未找到输出设备"
+        guard !refreshing else { refreshAgain = true; return }
+        refreshing = true
+        let query = selectedUID
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            let id = AudioDevice.findDevice(matching: query) ?? AudioDevice.defaultOutputDeviceID()
+            guard let id else {
+                DispatchQueue.main.async { self?.refreshDone(snap: nil, rows: nil, choices: nil) }
+                return
+            }
+            let snap = AudioDevice.snapshot(deviceID: id)
+            let rows = snap.streams.first.map { AppModel.group($0.available, current: $0.physical) }
+            let choices = includeDevices
+                ? AudioDevice.outputDeviceSnapshots().map { ($0.uid, $0.name) }
+                : nil
+            DispatchQueue.main.async { self?.refreshDone(snap: snap, rows: rows, choices: choices) }
+        }
+    }
+
+    @MainActor private func refreshDone(snap: DeviceSnapshot?,
+                                        rows: [RateRow]?,
+                                        choices: [(uid: String, name: String)]?) {
+        defer {
+            refreshing = false
+            if refreshAgain {
+                refreshAgain = false
+                refresh(includeDevices: choices != nil)
+            }
+        }
+        guard let snap else {
+            if deviceName != "未找到输出设备" { deviceName = "未找到输出设备" }
             return
         }
-        let snap = AudioDevice.snapshot(deviceID: id)
-        if deviceName != snap.name || isRunning != snap.runningSomewhere {
+        // 值变化才赋值：@Published 每次赋值都会触发 objectWillChange
+        // 并引发整棵 SwiftUI 树 diff，高频刷新时必须避免无效赋值
+        if isRunning != snap.runningSomewhere {
             isRunning = snap.runningSomewhere
             onRunningChange?(isRunning)
-        } else {
-            isRunning = snap.runningSomewhere
         }
-        deviceName = snap.name
-        isHogged = (snap.hogPID ?? -1) != -1
+        if deviceName != snap.name { deviceName = snap.name }
+        let hogged = (snap.hogPID ?? -1) != -1
+        if isHogged != hogged { isHogged = hogged }
         if let cur = snap.streams.first?.physical {
-            currentBits = Int(cur.mBitsPerChannel)
-            currentIsFloat = cur.mFormatFlags & kAudioFormatFlagIsFloat != 0
-            currentChannels = Int(cur.mChannelsPerFrame)
-            currentRateLabel = hz(cur.mSampleRate)
+            let bits = Int(cur.mBitsPerChannel)
+            let isFloat = cur.mFormatFlags & kAudioFormatFlagIsFloat != 0
+            let chs = Int(cur.mChannelsPerFrame)
+            let label = hz(cur.mSampleRate)
+            if currentBits != bits { currentBits = bits }
+            if currentIsFloat != isFloat { currentIsFloat = isFloat }
+            if currentChannels != chs { currentChannels = chs }
+            if currentRateLabel != label { currentRateLabel = label }
         }
-        if let stream = snap.streams.first {
-            rateRows = Self.group(stream.available, current: stream.physical)
-        }
-        if includeDevices {
-            deviceChoices = AudioDevice.outputDeviceSnapshots().map { ($0.uid, $0.name) }
-        }
+        if let rows, rows != rateRows { rateRows = rows }
+        if let choices, choices.map(\.uid) != deviceChoices.map(\.uid) { deviceChoices = choices }
     }
 
     /// 能力列表 → 按采样率分组的矩阵行（降序）
