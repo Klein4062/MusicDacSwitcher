@@ -122,6 +122,7 @@ public final class FormatController {
                abs(direct.asbd.mSampleRate - targetRate) < 0.5,
                apply(streamID: streamID, asbd: direct.asbd,
                      note: "单步直接切换 · \(direct.reason)", context: context) {
+                verifyNominalRate(deviceID: deviceID, target: targetRate, context: context)
                 return AudioDevice.streamPhysicalFormat(streamID)
             }
             logV("单步直接切换未生效，回退两步法 · \(context)")
@@ -155,6 +156,7 @@ public final class FormatController {
 
         guard apply(streamID: streamID, asbd: best.asbd,
                     note: best.reason, context: context) else { return nil }
+        verifyNominalRate(deviceID: deviceID, target: targetRate, context: context)
 
         if let verify = AudioDevice.streamPhysicalFormat(streamID) {
             if !sameFormat(verify, best.asbd) {
@@ -182,25 +184,56 @@ public final class FormatController {
                        asbd: AudioStreamBasicDescription,
                        note: String,
                        context: String) -> Bool {
+        // 兜底：硬件输出流必须是「可混音的交错格式」。写入 NonMixable（0x40）
+        // 会让 HAL 把设备当独占流、虚拟格式变成整数；写入非交错（0x20）会让
+        // 虚拟格式也变成非交错——两者都会让正在播放的播放器数据错位（加速/中断）。
+        var target = asbd
+        target.mFormatFlags &= ~(kAudioFormatFlagIsNonInterleaved | kAudioFormatFlagIsNonMixable)
+        let bpf = target.mChannelsPerFrame * target.mBitsPerChannel / 8
+        if target.mBytesPerFrame != bpf { target.mBytesPerFrame = bpf }
+        if target.mFramesPerPacket > 0,
+           target.mBytesPerPacket != bpf * target.mFramesPerPacket {
+            target.mBytesPerPacket = bpf * target.mFramesPerPacket
+        }
         if dryRun {
-            log("[dry-run] 将设置 \(describe(asbd)) （\(note)）· \(context)")
+            log("[dry-run] 将设置 \(describe(target)) （\(note)）· \(context)")
             return true
         }
         do {
-            try AudioDevice.setStreamPhysicalFormat(streamID, asbd)
+            try AudioDevice.setStreamPhysicalFormat(streamID, target)
             // CoreAudio 提交物理格式后是异步生效的：等待设备真正切换完成，
             // 否则后续枚举/回读会拿到旧采样率下的信息
-            if waitForFormat(streamID: streamID, target: asbd, timeoutMS: 800) {
-                log("已切换 → \(describe(asbd)) （\(note)）· \(context)")
+            if waitForFormat(streamID: streamID, target: target, timeoutMS: 800) {
+                log("已切换 → \(describe(target)) （\(note)）· \(context)")
                 return true
             }
             let actual = AudioDevice.streamPhysicalFormat(streamID).map(describe) ?? "?"
-            log("已提交 \(describe(asbd))，但等待生效超时（当前 \(actual)）· \(context)")
+            log("已提交 \(describe(target))，但等待生效超时（当前 \(actual)）· \(context)")
             return false
         } catch {
-            log("切换失败：\(error) · 目标 \(describe(asbd)) · \(context)")
+            log("切换失败：\(error) · 目标 \(describe(target)) · \(context)")
             return false
         }
+    }
+
+    /// 写入后确认设备标称采样率真的切过去了。
+    /// 部分驱动会接受一条无效的物理格式描述、回读也「成功」，随后异步回滚——
+    /// 只信流格式回读会漏掉这种失败（这正是非交错格式造成的问题之一）。
+    @discardableResult
+    private func verifyNominalRate(deviceID: AudioObjectID,
+                                   target: Float64,
+                                   context: String) -> Bool {
+        let deadline = Date().addingTimeInterval(0.35)
+        while Date() < deadline {
+            if let now = AudioDevice.nominalRate(deviceID), abs(now - target) < 0.5 {
+                return true
+            }
+            usleep(20_000)
+        }
+        if let now = AudioDevice.nominalRate(deviceID), abs(now - target) >= 0.5 {
+            log("⚠️ 设备标称采样率未生效：当前 \(hz(now))，目标 \(hz(target))（驱动拒绝了该格式）· \(context)")
+        }
+        return false
     }
 
     /// 轮询等待物理格式真正变更为目标值（属性 set 返回 noErr 不代表立即生效）

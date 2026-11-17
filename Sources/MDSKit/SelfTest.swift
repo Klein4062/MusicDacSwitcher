@@ -33,6 +33,21 @@ private let tp55: [PhysicalFormatEntry] = {
     return e
 }()
 
+/// 非交错（每声道独立缓冲区）条目
+private func niEntry(rate: Float64, bits: UInt32, channels: UInt32 = 2) -> PhysicalFormatEntry {
+    var e = entry(rate: rate, bits: bits, channels: channels)
+    e.asbd.mFormatFlags |= kAudioFormatFlagIsNonInterleaved
+    return e
+}
+
+/// NonMixable（flags 0x4c）条目：TP55 对每个采样率都会重复上报这一组，
+/// 采样率/位深/字节数与可混音组完全相同，只有 0x40 标志不同
+private func nmEntry(rate: Float64, bits: UInt32, channels: UInt32 = 2) -> PhysicalFormatEntry {
+    var e = entry(rate: rate, bits: bits, channels: channels)
+    e.asbd.mFormatFlags |= kAudioFormatFlagIsNonMixable
+    return e
+}
+
 /// 模拟仅支持 32k/48k/96k、16/20/24bit 的老 DAC（类似 LEN T27q）
 private let legacy48: [PhysicalFormatEntry] = {
     var e: [PhysicalFormatEntry] = []
@@ -159,6 +174,46 @@ public func runSelfTest() {
 
     // 空能力
     expect("空能力列表返回 nil", FormatMatcher.select(targetRate: 44100, targetBits: nil, entries: [], policy: .highest) == nil)
+
+    // 重复上报的伪格式：交错（0x20）与 NonMixable（0x40）都不能写入
+    do {
+        var dev = tp55
+        for rate: Float64 in [44100, 96000, 192000, 768000] {
+            dev.append(niEntry(rate: rate, bits: 32))
+            dev.append(niEntry(rate: rate, bits: 24))
+            dev.append(nmEntry(rate: rate, bits: 32))
+            dev.append(nmEntry(rate: rate, bits: 24))
+        }
+        let m = FormatMatcher.select(targetRate: 192000, targetBits: nil, entries: dev, policy: .highest)
+        expect("重复上报时选可混音格式（不选 NonMixable）",
+               m != nil && m!.asbd.mFormatFlags & kAudioFormatFlagIsNonMixable == 0)
+        expect("同时不选非交错格式",
+               m != nil && m!.asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0)
+        expect("选中格式 flags 为 0xc（与音频 MIDI 设置一致）",
+               m != nil && m!.asbd.mFormatFlags == kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked)
+        expect("选中格式位深仍为 32bit", m?.asbd.mBitsPerChannel == 32)
+        expect("交错格式字节数正确（2ch×32bit=8）",
+               m?.asbd.mBytesPerFrame == 8 && m?.asbd.mBytesPerPacket == 8)
+        // 位深匹配策略也不能落到其他条目
+        let m24 = FormatMatcher.select(targetRate: 96000, targetBits: 24, entries: dev, policy: .match(24))
+        expect("位深匹配 24bit 时同样选可混音交错",
+               m24 != nil && m24!.asbd.mFormatFlags & (kAudioFormatFlagIsNonInterleaved | kAudioFormatFlagIsNonMixable) == 0)
+        // 设备只上报伪格式：仍必须清洗成普通交错（清标志、修字节数）
+        let onlyBad = [nmEntry(rate: 44100, bits: 32), niEntry(rate: 44100, bits: 24)]
+        let m2 = FormatMatcher.select(targetRate: 44100, targetBits: nil, entries: onlyBad, policy: .highest)
+        expect("仅上报伪格式：写入前清除非交错/NonMixable 标志",
+               m2 != nil && m2!.asbd.mFormatFlags & (kAudioFormatFlagIsNonInterleaved | kAudioFormatFlagIsNonMixable) == 0)
+        expect("仅上报伪格式：字节数修正为交错口径", m2?.asbd.mBytesPerFrame == 8)
+        // sameFormat 必须能区分这些标志（否则写入失败的校验会漏判）
+        let a = entry(rate: 44100, bits: 24).asbd
+        var b = a
+        b.mFormatFlags |= kAudioFormatFlagIsNonInterleaved
+        expect("sameFormat 区分交错与非交错", !sameFormat(a, b))
+        var c = a
+        c.mFormatFlags |= kAudioFormatFlagIsNonMixable
+        expect("sameFormat 区分可混音与 NonMixable（0xc vs 0x4c 不能视为相同）", !sameFormat(a, c))
+        expect("sameFormat 同类格式仍相等", sameFormat(a, entry(rate: 44100, bits: 24).asbd))
+    }
 
     // 源探测：文件头解析
     do {

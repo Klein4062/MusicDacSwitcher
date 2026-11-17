@@ -27,6 +27,20 @@ public struct PhysicalFormatEntry {
         asbd.mFormatFlags & kAudioFormatFlagIsPacked != 0
             || asbd.mBytesPerFrame == asbd.mChannelsPerFrame * asbd.mBitsPerChannel / 8
     }
+    /// 非交错（每声道独立缓冲区，flags 0x20）。硬件输出流实际使用交错格式，
+    /// 写入非交错物理格式会让 HAL 把客户端可见的虚拟格式也改掉。选格式时排除。
+    public var isNonInterleaved: Bool {
+        asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+    }
+    /// NonMixable（不可混音 / 独占，flags 0x40）。
+    /// TP55 实测：每个采样率同时上报混音格式（flags 0xc）与不可混音格式
+    /// （flags 0x4c）两组，采样率/位深/字节数完全相同，只差 0x40 标志。
+    /// 「音频 MIDI 设置」切换后保持 0xc，虚拟格式为 float（0x9）；
+    /// 写入 0x4c 会让 HAL 把设备当成独占流，虚拟格式被改成整数，
+    /// 正在播放的播放器数据全部错位（表现为加速/中断）。选格式时必须排除。
+    public var isNonMixable: Bool {
+        asbd.mFormatFlags & kAudioFormatFlagIsNonMixable != 0
+    }
     public func coversRate(_ r: Float64) -> Bool { rateMin <= r && r <= rateMax }
 }
 
@@ -212,6 +226,8 @@ public func sameFormat(_ a: AudioStreamBasicDescription, _ b: AudioStreamBasicDe
         && a.mBytesPerFrame == b.mBytesPerFrame
         && (a.mFormatFlags & kAudioFormatFlagIsFloat != 0) == (b.mFormatFlags & kAudioFormatFlagIsFloat != 0)
         && (a.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0) == (b.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0)
+        && (a.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0) == (b.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0)
+        && (a.mFormatFlags & kAudioFormatFlagIsNonMixable != 0) == (b.mFormatFlags & kAudioFormatFlagIsNonMixable != 0)
 }
 
 /// 采样率显示，如 192.0kHz / 44.1kHz / 768.0kHz

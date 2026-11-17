@@ -54,7 +54,7 @@ public final class DeviceWatcher {
     public let controller: FormatController
     /// 每次设备事件（无论是否执行切换）回调，供 UI 刷新状态
     public var onEvent: ((String) -> Void)?
-    /// 空闲（无任何 IO）超过约 3 秒后恢复到的采样率；nil 表示不恢复
+    /// 空闲（无任何 IO）超过约 4 秒后恢复到的采样率；nil 表示不恢复
     public let restoreRate: Float64?
     /// 源探测轮询间隔（秒）
     public var probeInterval: Double = 4

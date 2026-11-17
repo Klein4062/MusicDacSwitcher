@@ -35,8 +35,15 @@ public enum FormatMatcher {
                        policy: BitDepthPolicy) -> FormatMatch? {
         guard !entries.isEmpty else { return nil }
 
+        // 0. 优先「可混音的交错格式」：设备常对同一采样率/位深上报多组仅 flags
+        //    不同的格式。TP55 实测：0xc（可混音）与 0x4c（NonMixable）两组，
+        //    采样率/位深字节数完全相同；「音频 MIDI 设置」切换后使用 0xc、
+        //    客户端虚拟格式为 float。写入 0x4c 会让 HAL 把设备当独占流，
+        //    虚拟格式变成整数，正在播放的数据全部错位（加速/中断）。
+        let candidates = preferMixable(entries)
+
         // 1. 采样率
-        let ratePlan = resolveRate(targetRate: targetRate, entries: entries)
+        let ratePlan = resolveRate(targetRate: targetRate, entries: candidates)
         var pool = ratePlan.pool
         let rate = ratePlan.rate
         var reason = ratePlan.reason
@@ -89,7 +96,23 @@ public enum FormatMatcher {
 
         // 4. 具体化采样率（连续区间设备需要把目标率写进 asbd）
         entry.asbd.mSampleRate = rate
-        return FormatMatch(asbd: entry.asbd, reason: reason, exactRate: exactRate)
+        // 兜底清洗：即使只能选到不可混音/非交错条目（设备只上报这类格式），
+        // 也要去掉这些标志，保证写入硬件流的是普通可混音交错格式
+        var asbd = entry.asbd
+        asbd.mFormatFlags &= ~(kAudioFormatFlagIsNonInterleaved | kAudioFormatFlagIsNonMixable)
+        let bpf = asbd.mChannelsPerFrame * asbd.mBitsPerChannel / 8
+        if asbd.mBytesPerFrame != bpf { asbd.mBytesPerFrame = bpf }
+        if asbd.mFramesPerPacket > 0, asbd.mBytesPerPacket != bpf * asbd.mFramesPerPacket {
+            asbd.mBytesPerPacket = bpf * asbd.mFramesPerPacket
+        }
+        return FormatMatch(asbd: asbd, reason: reason, exactRate: exactRate)
+    }
+
+    /// 过滤掉不可用于硬件输出流的候选（NonMixable 0x40 / 非交错 0x20）；
+    /// 若设备只上报这类格式则保留原列表（由后续清洗去掉标志）
+    static func preferMixable(_ entries: [PhysicalFormatEntry]) -> [PhysicalFormatEntry] {
+        let writable = entries.filter { !$0.isNonMixable && !$0.isNonInterleaved }
+        return writable.isEmpty ? entries : writable
     }
 
     // MARK: - 采样率决策
@@ -102,6 +125,7 @@ public enum FormatMatcher {
     }
 
     public static func resolveRate(targetRate: Float64, entries: [PhysicalFormatEntry]) -> RatePlan {
+        let entries = preferMixable(entries)
         // 精确匹配（含连续区间覆盖）
         let exactPool = entries.filter { $0.coversRate(targetRate) }
         if !exactPool.isEmpty {
