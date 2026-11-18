@@ -80,20 +80,27 @@ final class AppModel: ObservableObject {
     @Published var maxVrms: Double = AppModel.dblDefault("mds.hearing.vrms", 2.0) {
         didSet { UserDefaults.standard.set(maxVrms, forKey: "mds.hearing.vrms") }
     }
-    /// 告警阈值（dB SPL）
+    /// 告警阈值（dB SPL，平均口径）
     @Published var thresholdDB: Double = AppModel.dblDefault("mds.hearing.threshold", 85) {
         didSet { UserDefaults.standard.set(thresholdDB, forKey: "mds.hearing.threshold") }
     }
+    /// 音乐峰值因子（dB）：峰值与平均 RMS 之差，流行 ~12 / 古典 ~18 / 纯音 0
+    @Published var crestDB: Double = AppModel.dblDefault("mds.hearing.crest", 12) {
+        didSet { UserDefaults.standard.set(crestDB, forKey: "mds.hearing.crest") }
+    }
     /// 当前音量（dB，如 "-41.5 dB"；静音显示"静音"；无属性为 nil）
     @Published var volumeDBText: String?
-    /// 估算声压（如 "≈ 88 dB SPL"；无法估算为 nil）
-    @Published var estSPLText: String?
-    /// 估算声压当前是否超过阈值
+    /// 峰值口径估算声压（满幅正弦等效，如 "≤ 93 dB SPL"；无法估算为 nil）
+    @Published var peakSPLText: String?
+    /// 平均口径估算声压（≈ LAeq，告警依据，如 "≈ 81 dB SPL"；无法估算为 nil）
+    @Published var avgSPLText: String?
+    /// 估算声压当前是否超过阈值（平均口径）
     @Published var loud = false
 
     var hearingParams: HearingGuard.Params {
         HearingGuard.Params(sensitivity: sensDB, impedance: impOhm,
-                            maxVrms: maxVrms, threshold: thresholdDB)
+                            maxVrms: maxVrms, threshold: thresholdDB,
+                            crestDB: crestDB)
     }
 
     private static func dblDefault(_ key: String, _ def: Double) -> Double {
@@ -350,7 +357,8 @@ final class AppModel: ObservableObject {
     private func updateHearing(vol: AudioDevice.VolumeInfo?) {
         guard let vol, let db = vol.decibels else {
             if volumeDBText != nil { volumeDBText = nil }
-            if estSPLText != nil { estSPLText = nil }
+            if peakSPLText != nil { peakSPLText = nil }
+            if avgSPLText != nil { avgSPLText = nil }
             if loud { loud = false; onLoudChange?(false) }
             return
         }
@@ -358,15 +366,18 @@ final class AppModel: ObservableObject {
         if volumeDBText != newText { volumeDBText = newText }
 
         let params = hearingParams
-        let spl = vol.muted ? nil : HearingGuard.estimatedSPL(volumeDB: db, params: params)
-        let splText = spl.map { String(format: "≈ %.0f dB SPL", $0) }
-        if estSPLText != splText { estSPLText = splText }
+        let peak = vol.muted ? nil : HearingGuard.estimatedSPL(volumeDB: db, params: params)
+        let peakText = peak.map { String(format: "≤ %.0f dB SPL", $0) }
+        if peakSPLText != peakText { peakSPLText = peakText }
+        let avg = HearingGuard.averageSPL(peakSPL: peak, params: params)
+        let avgText = avg.map { String(format: "≈ %.0f dB SPL", $0) }
+        if avgSPLText != avgText { avgSPLText = avgText }
 
-        let isLoud = hearingEnabled && HearingGuard.exceedsThreshold(spl: spl, params: params)
+        let isLoud = hearingEnabled && HearingGuard.exceedsThreshold(spl: peak, params: params)
         if isLoud != loud {
             loud = isLoud
             if isLoud {
-                log("⚠️ 估算声压 \(splText ?? "") 已超过 \(Int(thresholdDB)) dB 阈值，建议调低音量（估算值，非实测）")
+                log("⚠️ 平均估算声压 \(avgText ?? "")（峰值 \(peakText ?? "")）已超过 \(Int(thresholdDB)) dB 阈值，建议调低音量（估算值，非实测）")
             }
             onLoudChange?(isLoud)
         }

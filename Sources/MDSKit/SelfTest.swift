@@ -374,20 +374,26 @@ public func runSelfTest() {
         expect("默认阈值：连续两次切换后掉线才熔断", g4.passive)
     }
 
-    // MARK: - 听力保护估算（HearingGuard）
+    // MARK: - 听力保护估算（HearingGuard，峰值 + 平均双口径）
     do {
-        let p = HearingGuard.Params() // 108 dB/mW · 32Ω · 2Vrms · 阈值 85
+        let p = HearingGuard.Params() // 108 dB/mW · 32Ω · 2Vrms · 阈值 85 · 峰值因子 12
         // 满幅：P = 4/32*1000 = 125mW → 108 + 10log10(125) ≈ 129.0
         let full = HearingGuard.estimatedSPL(volumeDB: 0, params: p)
         expect("满幅 0 dB 估算 SPL ≈ 129 dB", full != nil && abs(full! - 129) < 0.5)
-        // -41.5 dB：V ≈ 16.8mV → P ≈ 8.85µW → 108 - 20.5 ≈ 87.5
+        // -41.5 dB：V ≈ 16.8mV → P ≈ 8.85µW → 108 - 20.5 ≈ 87.5（峰值口径）
         let cur = HearingGuard.estimatedSPL(volumeDB: -41.5, params: p)
-        expect("-41.5 dB 估算 ≈ 87.5 dB 且超过 85 阈值",
-               cur != nil && abs(cur! - 87.5) < 0.5 && HearingGuard.exceedsThreshold(spl: cur, params: p))
-        // -45 dB：V ≈ 11.3mV → ≈ 84 dB，未超阈值
-        let safe = HearingGuard.estimatedSPL(volumeDB: -45, params: p)
-        expect("-45 dB 估算 ≈ 84 dB 未超阈值",
-               safe != nil && abs(safe! - 84) < 0.5 && !HearingGuard.exceedsThreshold(spl: safe, params: p))
+        expect("-41.5 dB 峰值估算 ≈ 87.5 dB",
+               cur != nil && abs(cur! - 87.5) < 0.5)
+        // 平均口径 = 峰值 − 峰值因子：87.5 − 12 = 75.5，未超 85（告警对平均口径）
+        expect("平均口径 = 峰值 − 12 ≈ 75.5 dB，未超阈值",
+               HearingGuard.averageSPL(peakSPL: cur, params: p).map { abs($0 - 75.5) < 0.5 } == true
+               && !HearingGuard.exceedsThreshold(spl: cur, params: p))
+        // 峰值因子 0（纯音）→ 退化为峰值口径判定：87.5 > 85 → 告警
+        expect("峰值因子 0 → 按峰值口径判定告警",
+               HearingGuard.exceedsThreshold(spl: cur, params: HearingGuard.Params(crestDB: 0)))
+        // 音量推高到平均也超阈值：峰值 100 → 平均 88 > 85
+        expect("峰值 100 dB（平均 88）→ 告警",
+               HearingGuard.exceedsThreshold(spl: 100, params: p))
         // 音量未知（无属性/静音）→ 不估算、不告警
         expect("音量未知 → SPL 为 nil 且不告警",
                HearingGuard.estimatedSPL(volumeDB: nil, params: p) == nil

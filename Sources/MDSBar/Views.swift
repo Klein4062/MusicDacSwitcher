@@ -103,9 +103,9 @@ struct HeaderCard: View {
                     if let vol = model.volumeDBText {
                         BadgeView(text: "音量 \(vol)", fg: .primary, bg: .primary.opacity(0.08))
                     }
-                    if model.loud, let spl = model.estSPLText {
+                    if model.loud, let spl = model.avgSPLText {
                         BadgeView(text: "\(spl) ⚠️", fg: .white, bg: .orange)
-                    } else if let spl = model.estSPLText {
+                    } else if let spl = model.avgSPLText {
                         BadgeView(text: spl, fg: .primary, bg: .primary.opacity(0.08))
                     }
                 }
@@ -321,8 +321,8 @@ struct AutoSwitchCard: View {
 
 // MARK: - 听力保护
 
-/// 音量 dB 读数 + 估算声压。估算基于耳机灵敏度/阻抗与输出口满幅电压，
-/// 是稳态等效值而非实测声压（软件无法实测，见 docs/source-probe.md 的说明）。
+/// 音量 dB 读数 + 估算声压（双口径：峰值 = 满幅正弦等效上限；平均 ≈ LAeq，
+/// 告警依据）。估算基于耳机灵敏度/阻抗与输出口满幅电压，非实测声压。
 struct HearingCard: View {
     @EnvironmentObject var model: AppModel
 
@@ -341,10 +341,10 @@ struct HearingCard: View {
                 HStack(spacing: 6) {
                     if let vol = model.volumeDBText {
                         Text("音量 \(vol)")
-                        if let spl = model.estSPLText {
+                        if let peak = model.peakSPLText, let avg = model.avgSPLText {
                             Image(systemName: "arrow.right")
                                 .font(.system(size: 8))
-                            Text("估算 \(spl)")
+                            Text("峰值 \(peak) · 平均 \(avg)")
                                 .foregroundStyle(model.loud ? Color.orange : Color.secondary)
                             if model.loud {
                                 Label("超过 \(Int(model.thresholdDB)) dB", systemImage: "exclamationmark.triangle.fill")
@@ -364,10 +364,15 @@ struct HearingCard: View {
                         paramField("灵敏度 dB/mW", $model.sensDB)
                         paramField("阻抗 Ω", $model.impOhm)
                         paramField("满幅 Vrms", $model.maxVrms)
-                        paramField("阈值 dB", $model.thresholdDB)
                     }
-                    Text("SPL = 灵敏度 + 20·log₁₀(V) − 10·log₁₀(阻抗)，V = 满幅 × 10^(音量dB/20)。"
-                         + "稳态等效估算（非实测），音乐峰值会更高；参数查耳机与 DAC 规格书。")
+                    HStack(spacing: 10) {
+                        paramField("阈值 dB", $model.thresholdDB)
+                        paramField("峰值因子 dB", $model.crestDB)
+                    }
+                    Text("SPL峰值 = 灵敏度 + 20·log₁₀(V) − 10·log₁₀(阻抗)，V = 满幅 × 10^(音量dB/20)；"
+                         + "平均 = 峰值 − 峰值因子（流行 ~12 / 古典 ~18 / 纯音 0），告警按平均口径。"
+                         + "满幅电压随 DAC 增益档变化（如 TP55：高 4.2 / 低 2.1 Vrms），切档请同步修改。"
+                         + "估算非实测；参数查耳机与 DAC 规格书。")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)

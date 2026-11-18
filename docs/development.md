@@ -5,13 +5,13 @@
 ```bash
 swift build                    # 调试构建（.build/debug/mds）
 swift build -c release         # 发布构建（.build/release/mds）
-.build/debug/mds selftest      # 64 项内置自测，改任何决策逻辑后必须全绿
+.build/debug/mds selftest      # 66 项内置自测，改任何决策逻辑后必须全绿
 ./scripts/make-app.sh --install  # 构建 GUI 并安装到 /Applications
 ```
 
 - 无第三方依赖；要求 macOS 12+ 与 Xcode Command Line Tools。
 - 自测覆盖：匹配算法、格式标志清洗、文件头解析（含 `.uc!`）、播放识别
-  （offset 前进 / 写句柄过滤）、稳定期与掉线熔断时间线、听力保护声压估算。
+  （offset 前进 / 写句柄过滤）、稳定期与掉线熔断时间线、听力保护声压估算（峰值/平均双口径）。
 - **纯函数层优先**：`FormatMatcher` / `DeviceWriteGuard` / `SourceProbe` 的解析
   都是纯逻辑，新行为先写成可自测的纯函数，再由 `Watcher` / `FormatController` 接线。
 

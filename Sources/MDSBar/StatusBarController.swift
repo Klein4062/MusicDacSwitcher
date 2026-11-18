@@ -91,7 +91,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let model = self.model
         let content = UNMutableNotificationContent()
         content.title = "MusicDacSwitcher 听力保护"
-        content.body = "当前估算声压 \(model.estSPLText ?? "")，已超过 \(Int(model.thresholdDB)) dB 阈值，建议调低音量"
+        content.body = "平均估算声压 \(model.avgSPLText ?? "")（峰值 \(model.peakSPLText ?? "")），已超过 \(Int(model.thresholdDB)) dB 阈值，建议调低音量"
         content.sound = .default
         let req = UNNotificationRequest(identifier: "mds.hearing.loud", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(req)

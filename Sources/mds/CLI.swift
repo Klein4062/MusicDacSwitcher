@@ -137,12 +137,13 @@ func cmdVol(_ args: [String]) {
         return
     }
     let params = HearingGuard.Params()
-    if let spl = HearingGuard.estimatedSPL(volumeDB: db, params: params) {
-        let verdict = HearingGuard.exceedsThreshold(spl: spl, params: params)
-            ? " → 已超过 \(Int(params.threshold)) dB 阈值 ⚠️" : ""
-        print(String(format: "估算声压 ≈ %.1f dB SPL（默认参数 %.0f dB/mW · %.0f Ω · %.1f Vrms）",
-                     spl, params.sensitivity, params.impedance, params.maxVrms) + verdict)
-        print("提示: GUI 面板「听力保护」可按耳机实际灵敏度/阻抗调整参数；0 dB 音量 = 无衰减直通")
+    if let peak = HearingGuard.estimatedSPL(volumeDB: db, params: params),
+       let avg = HearingGuard.averageSPL(peakSPL: peak, params: params) {
+        let verdict = HearingGuard.exceedsThreshold(spl: peak, params: params)
+            ? " → 平均已超过 \(Int(params.threshold)) dB 阈值 ⚠️" : ""
+        print(String(format: "估算声压: 峰值 ≤ %.1f · 平均 ≈ %.1f dB SPL（默认参数 %.0f dB/mW · %.0f Ω · %.1f Vrms · 峰值因子 %.0f dB）",
+                     peak, avg, params.sensitivity, params.impedance, params.maxVrms, params.crestDB) + verdict)
+        print("提示: 峰值=满幅正弦等效上限，平均≈LAeq（告警口径）；GUI 面板可按耳机实际参数调整；0 dB 音量 = 无衰减直通")
     }
 }
 
