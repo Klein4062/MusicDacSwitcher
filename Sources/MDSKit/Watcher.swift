@@ -244,16 +244,31 @@ public final class DeviceWatcher {
         }
     }
 
-    /// 每次轮询检查已绑定设备是否仍在系统中；消失则触发重绑
+    /// 每次轮询检查绑定是否仍然有效：设备消失、或对象 ID 变化都触发重绑。
+    ///
+    /// HAL 的 AudioObjectID 是临时的：USB 短暂重枚举（如端口复位、睡眠唤醒）
+    /// 后设备会拿到新 ID。若重枚举恰好落在两次探测（4s）之间，旧 ID 上的
+    /// 属性监听器从此不再回调、读旧 ID 也拿不到真实状态——只查 uid 是否
+    /// 存在会漏判，Watcher 会变成永远「查无播放」的僵尸（且日志毫无异常）。
+    /// 因此必须比对解析出的 ID 与当前绑定是否一致。
     private func deviceStillPresent() -> Bool {
         guard let uid = boundUID else { return true }
-        if AudioDevice.findDevice(matching: uid) != nil { return true }
-        log("⚠️ 设备已从系统消失（uid=\(uid)）")
-        noteDeviceVanished()
-        currentDevice = 0
-        boundUID = nil
-        scheduleRebind(reason: "设备消失")
-        return false
+        guard let id = AudioDevice.findDevice(matching: uid) else {
+            log("⚠️ 设备已从系统消失（uid=\(uid)）")
+            noteDeviceVanished()
+            currentDevice = 0
+            boundUID = nil
+            scheduleRebind(reason: "设备消失")
+            return false
+        }
+        if id != currentDevice {
+            log("设备已重新枚举（HAL 对象 ID 变化），重新绑定监听 · uid=\(uid)")
+            currentDevice = 0
+            boundUID = nil
+            scheduleRebind(reason: "设备对象更新")
+            return false
+        }
+        return true
     }
 
     /// 观测播放状态并维护起播稳定期；返回设备当前是否在播放

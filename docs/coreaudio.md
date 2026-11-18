@@ -49,6 +49,20 @@
   对少数播放器仍有风险：写失败时回退「登记 pending、空闲 ≥4s 后应用」，
   不要在播放中反复重试（`lastFailedKey` 30s 退避）。
 
+## 陷阱三：AudioObjectID 是临时的（重枚举后静默失效）
+
+USB 短暂重枚举（端口复位、睡眠唤醒）后 HAL 会给设备分配**新的对象 ID**，uid 不变。
+若重枚举落在两次探测（4s）之间，不会留下任何可观测事件：
+
+- 旧 ID 上的属性监听器从此不再回调（事件静默消失）
+- 读旧 ID 的属性返回错误 → `isRunningSomewhere` 恒为 false
+- 按 uid 查找设备仍然成功 → 「设备存在」检查放行
+
+三者叠加 = Watcher 变成永远「查无播放」的僵尸，日志毫无异常，重启才恢复。
+防御：`deviceStillPresent()` 每 4s 比对 `findDevice(uid)` 解析出的 ID 与当前绑定的
+`currentDevice`，不一致即重绑（`Watcher.swift`）。症状识别：面板显示正常、
+设备在播但无任何切换/事件日志 → 先怀疑僵尸绑定。
+
 ## 写入后的校验
 
 `AudioObjectSetPropertyData` 返回 noErr ≠ 生效：
