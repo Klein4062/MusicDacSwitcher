@@ -13,6 +13,7 @@ struct PopoverRootView: View {
             VStack(spacing: 10) {
                 HeaderCard()
                 AutoSwitchCard()
+                HearingCard()
                 FormatsCard()
                 LogCard()
                 FooterBar()
@@ -99,6 +100,14 @@ struct HeaderCard: View {
                               fg: .primary, bg: .primary.opacity(0.08))
                     BadgeView(text: "\(model.currentBits) bit \(model.currentIsFloat ? "Float" : "Int")",
                               fg: .white, bg: .accentColor)
+                    if let vol = model.volumeDBText {
+                        BadgeView(text: "音量 \(vol)", fg: .primary, bg: .primary.opacity(0.08))
+                    }
+                    if model.loud, let spl = model.estSPLText {
+                        BadgeView(text: "\(spl) ⚠️", fg: .white, bg: .orange)
+                    } else if let spl = model.estSPLText {
+                        BadgeView(text: spl, fg: .primary, bg: .primary.opacity(0.08))
+                    }
                 }
             }
             .padding(14)
@@ -306,6 +315,78 @@ struct AutoSwitchCard: View {
                     .disabled(!model.autoSwitch)
                 }
             }
+        }
+    }
+}
+
+// MARK: - 听力保护
+
+/// 音量 dB 读数 + 估算声压。估算基于耳机灵敏度/阻抗与输出口满幅电压，
+/// 是稳态等效值而非实测声压（软件无法实测，见 docs/source-probe.md 的说明）。
+struct HearingCard: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("听力保护", systemImage: "ear")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    Toggle("", isOn: $model.hearingEnabled)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                }
+                HStack(spacing: 6) {
+                    if let vol = model.volumeDBText {
+                        Text("音量 \(vol)")
+                        if let spl = model.estSPLText {
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 8))
+                            Text("估算 \(spl)")
+                                .foregroundStyle(model.loud ? Color.orange : Color.secondary)
+                            if model.loud {
+                                Label("超过 \(Int(model.thresholdDB)) dB", systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                    } else {
+                        Text("设备未上报音量")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .font(.system(size: 10, design: .monospaced))
+
+                if model.hearingEnabled {
+                    HStack(spacing: 10) {
+                        paramField("灵敏度 dB/mW", $model.sensDB)
+                        paramField("阻抗 Ω", $model.impOhm)
+                        paramField("满幅 Vrms", $model.maxVrms)
+                        paramField("阈值 dB", $model.thresholdDB)
+                    }
+                    Text("SPL = 灵敏度 + 20·log₁₀(V) − 10·log₁₀(阻抗)，V = 满幅 × 10^(音量dB/20)。"
+                         + "稳态等效估算（非实测），音乐峰值会更高；参数查耳机与 DAC 规格书。")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func paramField(_ label: String, _ value: Binding<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+            TextField("", value: value, formatter: AppModel.numFmt)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.mini)
+                .frame(width: 64)
+                .font(.system(size: 11, design: .monospaced))
         }
     }
 }

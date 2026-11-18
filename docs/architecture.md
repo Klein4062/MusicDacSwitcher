@@ -13,9 +13,10 @@
 │  FormatController.swift  切换执行（写入 + 等待生效 + 校验）       │
 │  DeviceWriteGuard.swift  稳定期 + 掉线熔断（纯逻辑，可自测）      │
 │  SourceProbe.swift   源探测：原生 fd 扫描 + 文件头解析            │
+│  HearingGuard.swift  听力保护：音量→估算声压（纯函数，可自测）    │
 │  Watcher.swift       调度中枢：监听属性 / 防抖 / 探测定时器       │
 │  Log.swift           日志 sink（CLI→stdout，GUI→面板）           │
-│  SelfTest.swift      内置自测（59 项）                           │
+│  SelfTest.swift      内置自测（64 项）                           │
 └──────────────────────────────────────────────────────────────────┘
         ▲                                        ▲
 Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
@@ -75,5 +76,8 @@ Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
 - `StatusBarController.swift`：状态栏图标、NSPopover 呈现、点击外部关闭
 - `AppModel.swift`：`@MainActor` 状态中枢，持有一个 `DeviceWatcher` + `FormatController`
 - `Views.swift`：SwiftUI 面板
+- 听力保护：2s 刷新时顺带读 `AudioDevice.volumeInfo`，`HearingGuard` 估算声压；
+  超阈值边沿 → 状态栏图标变橙 + 系统通知（持续超阈值 5 分钟内不重复提醒）。
+  估算参数（灵敏度/阻抗/满幅电压/阈值）持久化在 UserDefaults（`mds.hearing.*`）
 
 日志从 MDSKit 经 `LogSink.handler` 回调汇入 `AppModel`，0.5s 批量合并后刷 UI。

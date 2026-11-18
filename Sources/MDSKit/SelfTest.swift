@@ -374,6 +374,29 @@ public func runSelfTest() {
         expect("默认阈值：连续两次切换后掉线才熔断", g4.passive)
     }
 
+    // MARK: - 听力保护估算（HearingGuard）
+    do {
+        let p = HearingGuard.Params() // 108 dB/mW · 32Ω · 2Vrms · 阈值 85
+        // 满幅：P = 4/32*1000 = 125mW → 108 + 10log10(125) ≈ 129.0
+        let full = HearingGuard.estimatedSPL(volumeDB: 0, params: p)
+        expect("满幅 0 dB 估算 SPL ≈ 129 dB", full != nil && abs(full! - 129) < 0.5)
+        // -41.5 dB：V ≈ 16.8mV → P ≈ 8.85µW → 108 - 20.5 ≈ 87.5
+        let cur = HearingGuard.estimatedSPL(volumeDB: -41.5, params: p)
+        expect("-41.5 dB 估算 ≈ 87.5 dB 且超过 85 阈值",
+               cur != nil && abs(cur! - 87.5) < 0.5 && HearingGuard.exceedsThreshold(spl: cur, params: p))
+        // -45 dB：V ≈ 11.3mV → ≈ 84 dB，未超阈值
+        let safe = HearingGuard.estimatedSPL(volumeDB: -45, params: p)
+        expect("-45 dB 估算 ≈ 84 dB 未超阈值",
+               safe != nil && abs(safe! - 84) < 0.5 && !HearingGuard.exceedsThreshold(spl: safe, params: p))
+        // 音量未知（无属性/静音）→ 不估算、不告警
+        expect("音量未知 → SPL 为 nil 且不告警",
+               HearingGuard.estimatedSPL(volumeDB: nil, params: p) == nil
+               && !HearingGuard.exceedsThreshold(spl: nil, params: p))
+        // 非法参数 → 防除零
+        expect("阻抗 0 → 返回 nil 不崩溃",
+               HearingGuard.estimatedSPL(volumeDB: 0, params: HearingGuard.Params(impedance: 0)) == nil)
+    }
+
     print()
     print("结果: \(passCount) 通过, \(failCount) 失败")
     if failCount > 0 { exit(1) }

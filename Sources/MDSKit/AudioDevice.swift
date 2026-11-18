@@ -152,6 +152,55 @@ public enum AudioDevice {
         return nil
     }
 
+    // ---- 音量 ----
+
+    /// 设备输出音量（硬件/驱动侧衰减，相对满幅；0 dB = 最大输出）
+    public struct VolumeInfo: Equatable {
+        /// 当前衰减（dB，≤0）。多声道取各声道最大值；设备无音量属性时为 nil
+        public var decibels: Double?
+        /// 静音（Mute 属性开启，或音量 scalar 为 0）
+        public var muted: Bool
+        /// scalar 音量（0~1，多声道取最大值）
+        public var scalar: Double?
+        /// dB 范围（如 -100 ~ 0）
+        public var rangeMin: Double?
+        public var rangeMax: Double?
+    }
+
+    /// 读取设备输出音量。依次尝试主声道(0)与左右声道(1/2)：
+    /// TP55 等设备只在逐声道(1/2)上暴露音量属性，主声道(0)无。
+    public static func volumeInfo(deviceID: AudioObjectID) -> VolumeInfo {
+        var info = VolumeInfo(decibels: nil, muted: false, scalar: nil, rangeMin: nil, rangeMax: nil)
+        for ch: AudioObjectPropertyElement in [0, 1, 2] {
+            guard caHas(deviceID, kAudioDevicePropertyVolumeScalar,
+                        scope: kAudioObjectPropertyScopeOutput, element: ch) else { continue }
+            guard let v: Float32 = try? caGet(deviceID, kAudioDevicePropertyVolumeScalar,
+                                              scope: kAudioObjectPropertyScopeOutput,
+                                              element: ch, label: "volume-scalar") else { continue }
+            info.scalar = max(info.scalar ?? 0, Double(v))
+            if let db: Float32 = try? caGet(deviceID, kAudioDevicePropertyVolumeDecibels,
+                                            scope: kAudioObjectPropertyScopeOutput,
+                                            element: ch, label: "volume-db") {
+                info.decibels = max(info.decibels ?? -999, Double(db))
+            }
+            if let r: AudioValueRange = try? caGet(deviceID, kAudioDevicePropertyVolumeRangeDecibels,
+                                                   scope: kAudioObjectPropertyScopeOutput,
+                                                   element: ch, label: "volume-range") {
+                info.rangeMin = r.mMinimum
+                info.rangeMax = r.mMaximum
+            }
+        }
+        for ch: AudioObjectPropertyElement in [0, 1, 2] {
+            if let m: UInt32 = try? caGet(deviceID, kAudioDevicePropertyMute,
+                                          scope: kAudioObjectPropertyScopeOutput,
+                                          element: ch, label: "mute"), m == 1 {
+                info.muted = true
+            }
+        }
+        if info.scalar == 0 { info.muted = true }
+        return info
+    }
+
     // ---- 流 ----
 
     /// 设备（输出方向）的流 ID 列表

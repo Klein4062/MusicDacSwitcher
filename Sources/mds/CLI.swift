@@ -72,6 +72,7 @@ func cliMain() {
     case "set": cmdSet(args)
     case "watch", "daemon": cmdWatch(args)
     case "probe": cmdProbe(args)
+    case "vol", "volume": cmdVol(args)
     case "playtest": cmdPlayTest(args)
     case "selftest", "test": runSelfTest()
     case "version": print("MusicDacSwitcher 0.1.0")
@@ -89,6 +90,7 @@ func printHelp() {
       mds best <rate> [--bits N]            预览对某采样率将选择的最佳格式（不修改）
       mds set <rate> [--bits N] [--device]  立即切换到最佳格式（如 44100 / 192k / 768kHz）
       mds probe                             查看探测到的打开音频文件（含正在播放识别）
+      mds vol [--device <uid|名称>]         查看设备音量（dB）与估算声压
       mds playtest <文件> [--device] [--seconds N]  端到端测试：静音播放验证自动切换
       mds watch [选项]                      守护模式：播放时自动切换
         --device <uid|名称>     指定设备（默认跟随系统默认输出设备）
@@ -111,6 +113,38 @@ func printHelp() {
 }
 
 // MARK: - 子命令
+
+/// 查看设备音量（dB）与估算声压
+func cmdVol(_ args: [String]) {
+    let p = parseArgs(args)
+    guard let id = AudioDevice.findDevice(matching: p.options["device"]) else {
+        fail("未找到输出设备")
+    }
+    let snap = AudioDevice.snapshot(deviceID: id)
+    let vol = AudioDevice.volumeInfo(deviceID: id)
+    print("设备: \(snap.name)")
+    guard let db = vol.decibels else {
+        print("音量: 设备未上报音量属性（固定输出或独占模式）")
+        return
+    }
+    let scalar = vol.scalar.map { String(format: "%.3f", $0) } ?? "?"
+    print("音量: \(String(format: "%.1f", db)) dB（scalar \(scalar)）")
+    if let lo = vol.rangeMin, let hi = vol.rangeMax {
+        print("范围: \(String(format: "%.1f", lo)) ~ \(String(format: "%.1f", hi)) dB")
+    }
+    if vol.muted {
+        print("状态: 静音")
+        return
+    }
+    let params = HearingGuard.Params()
+    if let spl = HearingGuard.estimatedSPL(volumeDB: db, params: params) {
+        let verdict = HearingGuard.exceedsThreshold(spl: spl, params: params)
+            ? " → 已超过 \(Int(params.threshold)) dB 阈值 ⚠️" : ""
+        print(String(format: "估算声压 ≈ %.1f dB SPL（默认参数 %.0f dB/mW · %.0f Ω · %.1f Vrms）",
+                     spl, params.sensitivity, params.impedance, params.maxVrms) + verdict)
+        print("提示: GUI 面板「听力保护」可按耳机实际灵敏度/阻抗调整参数；0 dB 音量 = 无衰减直通")
+    }
+}
 
 func cmdList(_ args: [String]) {
     let p = parseArgs(args)

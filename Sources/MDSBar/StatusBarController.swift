@@ -2,14 +2,31 @@
 
 import AppKit
 import SwiftUI
+import UserNotifications
 import MDSKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var bar: StatusBarController?
+    /// 通知前台呈现（应用激活时横幅仍显示）+ 首次授权请求
+    private let notifDelegate = NotifDelegate()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = notifDelegate
+        if AppModel.shared.hearingEnabled {
+            center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
         bar = StatusBarController()
+    }
+}
+
+final class NotifDelegate: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler:
+                                @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
 }
 
@@ -40,22 +57,47 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.contentViewController = NSHostingController(
             rootView: PopoverRootView().environmentObject(model))
 
-        model.onRunningChange = { [weak self] running in
-            self?.updateIcon(running: running)
+        model.onRunningChange = { [weak self] _ in self?.updateIcon() }
+        model.onLoudChange = { [weak self] loud in
+            guard let self else { return }
+            self.updateIcon()
+            guard loud else { return }
+            self.notifyLoud()
         }
         model.start()
-        updateIcon(running: model.isRunning)
+        updateIcon()
     }
 
-    private func updateIcon(running: Bool) {
+    private func updateIcon() {
         guard let button = statusItem?.button else { return }
-        let symbol = running ? "waveform" : "waveform"
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "MusicDacSwitcher") {
+        if let image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "MusicDacSwitcher") {
             let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
             button.image = image.withSymbolConfiguration(cfg)
-            button.contentTintColor = running ? .systemGreen : nil
+            // 优先级：听力告警(橙) > 播放中(绿) > 默认
+            if model.loud && model.hearingEnabled {
+                button.contentTintColor = .systemOrange
+            } else if model.isRunning {
+                button.contentTintColor = .systemGreen
+            } else {
+                button.contentTintColor = nil
+            }
         }
     }
+
+    /// 估算声压超阈值 → 系统通知。持续超阈值期间 5 分钟内不重复打扰。
+    private func notifyLoud() {
+        if let last = lastLoudNotify, Date().timeIntervalSince(last) < 300 { return }
+        lastLoudNotify = Date()
+        let model = self.model
+        let content = UNMutableNotificationContent()
+        content.title = "MusicDacSwitcher 听力保护"
+        content.body = "当前估算声压 \(model.estSPLText ?? "")，已超过 \(Int(model.thresholdDB)) dB 阈值，建议调低音量"
+        content.sound = .default
+        let req = UNNotificationRequest(identifier: "mds.hearing.loud", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
+    }
+
+    private var lastLoudNotify: Date?
 
     @objc private func togglePopover(_ sender: NSStatusBarButton) {
         if popover.isShown {

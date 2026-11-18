@@ -58,6 +58,58 @@ final class AppModel: ObservableObject {
     }
 
     var onRunningChange: ((Bool) -> Void)?
+    /// 估算声压超过阈值的边沿回调（触发系统通知与图标变色）
+    var onLoudChange: ((Bool) -> Void)?
+
+    // MARK: - 听力保护
+
+    /// 听力保护开关（估算声压超阈值时提醒）
+    @Published var hearingEnabled: Bool =
+        (UserDefaults.standard.object(forKey: "mds.hearing.enabled") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(hearingEnabled, forKey: "mds.hearing.enabled") }
+    }
+    /// 耳机灵敏度（dB/mW）
+    @Published var sensDB: Double = AppModel.dblDefault("mds.hearing.sens", 108) {
+        didSet { UserDefaults.standard.set(sensDB, forKey: "mds.hearing.sens") }
+    }
+    /// 耳机阻抗（Ω）
+    @Published var impOhm: Double = AppModel.dblDefault("mds.hearing.imp", 32) {
+        didSet { UserDefaults.standard.set(impOhm, forKey: "mds.hearing.imp") }
+    }
+    /// 输出口满幅电压（Vrms）
+    @Published var maxVrms: Double = AppModel.dblDefault("mds.hearing.vrms", 2.0) {
+        didSet { UserDefaults.standard.set(maxVrms, forKey: "mds.hearing.vrms") }
+    }
+    /// 告警阈值（dB SPL）
+    @Published var thresholdDB: Double = AppModel.dblDefault("mds.hearing.threshold", 85) {
+        didSet { UserDefaults.standard.set(thresholdDB, forKey: "mds.hearing.threshold") }
+    }
+    /// 当前音量（dB，如 "-41.5 dB"；静音显示"静音"；无属性为 nil）
+    @Published var volumeDBText: String?
+    /// 估算声压（如 "≈ 88 dB SPL"；无法估算为 nil）
+    @Published var estSPLText: String?
+    /// 估算声压当前是否超过阈值
+    @Published var loud = false
+
+    var hearingParams: HearingGuard.Params {
+        HearingGuard.Params(sensitivity: sensDB, impedance: impOhm,
+                            maxVrms: maxVrms, threshold: thresholdDB)
+    }
+
+    private static func dblDefault(_ key: String, _ def: Double) -> Double {
+        UserDefaults.standard.object(forKey: key) == nil
+            ? def : UserDefaults.standard.double(forKey: key)
+    }
+
+    /// 面板数值输入格式（无千分位，最多 1 位小数）
+    static let numFmt: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.usesGroupingSeparator = false
+        f.minimumFractionDigits = 0
+        f.maximumFractionDigits = 1
+        return f
+    }()
 
     // MARK: - 位深策略
 
@@ -239,21 +291,23 @@ final class AppModel: ObservableObject {
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             let id = AudioDevice.findDevice(matching: query) ?? AudioDevice.defaultOutputDeviceID()
             guard let id else {
-                DispatchQueue.main.async { self?.refreshDone(snap: nil, rows: nil, choices: nil) }
+                DispatchQueue.main.async { self?.refreshDone(snap: nil, rows: nil, choices: nil, vol: nil) }
                 return
             }
             let snap = AudioDevice.snapshot(deviceID: id)
             let rows = snap.streams.first.map { AppModel.group($0.available, current: $0.physical) }
+            let vol = AudioDevice.volumeInfo(deviceID: id)
             let choices = includeDevices
                 ? AudioDevice.outputDeviceSnapshots().map { ($0.uid, $0.name) }
                 : nil
-            DispatchQueue.main.async { self?.refreshDone(snap: snap, rows: rows, choices: choices) }
+            DispatchQueue.main.async { self?.refreshDone(snap: snap, rows: rows, choices: choices, vol: vol) }
         }
     }
 
     @MainActor private func refreshDone(snap: DeviceSnapshot?,
                                         rows: [RateRow]?,
-                                        choices: [(uid: String, name: String)]?) {
+                                        choices: [(uid: String, name: String)]?,
+                                        vol: AudioDevice.VolumeInfo?) {
         defer {
             refreshing = false
             if refreshAgain {
@@ -263,6 +317,7 @@ final class AppModel: ObservableObject {
         }
         guard let snap else {
             if deviceName != "未找到输出设备" { deviceName = "未找到输出设备" }
+            updateHearing(vol: nil)
             return
         }
         // 值变化才赋值：@Published 每次赋值都会触发 objectWillChange
@@ -286,6 +341,35 @@ final class AppModel: ObservableObject {
         }
         if let rows, rows != rateRows { rateRows = rows }
         if let choices, choices.map(\.uid) != deviceChoices.map(\.uid) { deviceChoices = choices }
+        updateHearing(vol: vol)
+    }
+
+    /// 更新音量读数与听力保护状态（在主线程，2s 轮询驱动）。
+    /// 超阈值的「边沿」触发 onLoudChange（系统通知 + 图标变色）；
+    /// 持续超阈值不重复打扰，回落再越过才重新提醒。
+    private func updateHearing(vol: AudioDevice.VolumeInfo?) {
+        guard let vol, let db = vol.decibels else {
+            if volumeDBText != nil { volumeDBText = nil }
+            if estSPLText != nil { estSPLText = nil }
+            if loud { loud = false; onLoudChange?(false) }
+            return
+        }
+        let newText = vol.muted ? "静音" : String(format: "%.1f dB", db)
+        if volumeDBText != newText { volumeDBText = newText }
+
+        let params = hearingParams
+        let spl = vol.muted ? nil : HearingGuard.estimatedSPL(volumeDB: db, params: params)
+        let splText = spl.map { String(format: "≈ %.0f dB SPL", $0) }
+        if estSPLText != splText { estSPLText = splText }
+
+        let isLoud = hearingEnabled && HearingGuard.exceedsThreshold(spl: spl, params: params)
+        if isLoud != loud {
+            loud = isLoud
+            if isLoud {
+                log("⚠️ 估算声压 \(splText ?? "") 已超过 \(Int(thresholdDB)) dB 阈值，建议调低音量（估算值，非实测）")
+            }
+            onLoudChange?(isLoud)
+        }
     }
 
     /// 能力列表 → 按采样率分组的矩阵行（降序）
