@@ -16,7 +16,7 @@
 │  HearingGuard.swift  听力保护：音量→声压估算，峰值/平均双口径    │
 │  Watcher.swift       调度中枢：监听属性 / 防抖 / 探测定时器       │
 │  Log.swift           日志 sink（CLI→stdout，GUI→面板）           │
-│  SelfTest.swift      内置自测（66 项）                           │
+│  SelfTest.swift      内置自测（68 项）                           │
 └──────────────────────────────────────────────────────────────────┘
         ▲                                        ▲
 Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
@@ -79,7 +79,8 @@ Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
 - 听力保护：2s 刷新时顺带读 `AudioDevice.volumeInfo`，`HearingGuard` 估算声压
   （峰值 = 满幅正弦等效；平均 = 峰值 − 峰值因子，告警按平均口径）；
   超阈值边沿 → 状态栏图标变橙 + 系统通知（持续超阈值 5 分钟内不重复提醒）。
-  估算参数（灵敏度/阻抗/满幅电压/阈值/峰值因子）持久化在 UserDefaults（`mds.hearing.*`）；
-  满幅电压需跟随 DAC 机身增益档（模拟域切换，macOS 感知不到）
+  估算参数（灵敏度/阻抗/满幅电压/阈值/峰值因子/机身衰减）持久化在 UserDefaults（`mds.hearing.*`）；
+  满幅电压需跟随 DAC 机身增益档（模拟域切换，macOS 感知不到）；
+  机身旋钮不联动系统音量时（读数恒 0dB）衰减同样感知不到，经「机身衰减」参数手动补偿
 
 日志从 MDSKit 经 `LogSink.handler` 回调汇入 `AppModel`，0.5s 批量合并后刷 UI。

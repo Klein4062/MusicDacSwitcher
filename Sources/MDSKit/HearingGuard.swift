@@ -5,7 +5,7 @@
 // 输出口满幅电压（规格书）可以估算出稳态等效声压级，足够做听力防护提醒。
 //
 // 估算公式（1 kHz 满幅正弦等效，非实测）：
-//   V = 满幅电压 × 10^(音量dB / 20)          （音量 dB ≤ 0）
+//   V = 满幅电压 × 10^((音量dB + 机身衰减dB) / 20)   （均为衰减，≤ 0）
 //   P[mW] = V² / 阻抗 × 1000
 //   SPL_peak = 灵敏度(dB/mW) + 10·log₁₀(P)
 //   SPL_avg  = SPL_peak − 音乐峰值因子（crest factor）
@@ -15,6 +15,8 @@
 // 85 dB 对应平均声压（LAeq），因此告警对平均口径判定。
 // 另注意 DAC 机身增益档（模拟域）改变满幅基准，macOS 感知不到，
 // 需要在界面把「满幅电压」参数跟随当前增益档（如 TP55：高 4.2 / 低 2.1 Vrms）。
+// 同理，机身音量旋钮若不联动系统音量（macOS 读数恒 0dB），实际衰减
+// 只能经「机身衰减」参数手动补偿；填 0 表示机身全开/数字链路即全部衰减。
 
 import Foundation
 
@@ -33,24 +35,30 @@ public enum HearingGuard {
         /// 音乐峰值因子（dB）：峰值与平均 RMS 的差，流行 ~12、古典 ~18、纯音测试 0。
         /// 告警与显示的平均声压按此从峰值口径折算
         public var crestDB: Double
+        /// 机身音量旋钮衰减（dB，≤0）：DAC 旋钮不联动系统音量时（macOS 读数恒 0dB）
+        /// 的手动补偿。0 = 机身全开，数字链路衰减即全部衰减。屏显无 dB 时按听感粗校准
+        public var deviceAttenuationDB: Double
 
         public init(sensitivity: Double = 108, impedance: Double = 32,
                     maxVrms: Double = 2.0, threshold: Double = 85,
-                    crestDB: Double = 12) {
+                    crestDB: Double = 12, deviceAttenuationDB: Double = 0) {
             self.sensitivity = sensitivity
             self.impedance = impedance
             self.maxVrms = maxVrms
             self.threshold = threshold
             self.crestDB = crestDB
+            self.deviceAttenuationDB = deviceAttenuationDB
         }
     }
 
     /// 由当前音量衰减估算峰值口径声压（满幅正弦等效，dB SPL）。
-    /// volumeDB 为设备相对满幅的衰减（≤0）；静音/无音量信息/参数非法 → nil。
+    /// volumeDB 为系统读到的衰减（≤0），再叠加机身旋钮衰减参数；
+    /// 静音/无音量信息/参数非法 → nil。
     public static func estimatedSPL(volumeDB: Double?, params: Params) -> Double? {
         guard let db = volumeDB, db > -200 else { return nil }
         guard params.impedance > 0, params.maxVrms > 0 else { return nil }
-        let clamped = max(db, -120) // 极低音量下避免下溢，钳到 -120 dB
+        let effective = db + params.deviceAttenuationDB
+        let clamped = max(effective, -120) // 极低音量下避免下溢，钳到 -120 dB
         let volts = params.maxVrms * pow(10.0, clamped / 20)
         guard volts > 0 else { return nil }
         let milliwatts = volts * volts / params.impedance * 1000

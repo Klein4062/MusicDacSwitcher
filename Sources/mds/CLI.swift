@@ -137,13 +137,25 @@ func cmdVol(_ args: [String]) {
         return
     }
     let params = HearingGuard.Params()
-    if let peak = HearingGuard.estimatedSPL(volumeDB: db, params: params),
-       let avg = HearingGuard.averageSPL(peakSPL: peak, params: params) {
-        let verdict = HearingGuard.exceedsThreshold(spl: peak, params: params)
-            ? " → 平均已超过 \(Int(params.threshold)) dB 阈值 ⚠️" : ""
-        print(String(format: "估算声压: 峰值 ≤ %.1f · 平均 ≈ %.1f dB SPL（默认参数 %.0f dB/mW · %.0f Ω · %.1f Vrms · 峰值因子 %.0f dB）",
-                     peak, avg, params.sensitivity, params.impedance, params.maxVrms, params.crestDB) + verdict)
-        print("提示: 峰值=满幅正弦等效上限，平均≈LAeq（告警口径）；GUI 面板可按耳机实际参数调整；0 dB 音量 = 无衰减直通")
+    // GUI 面板持久化的真实参数优先（写入 com.musicdacswitcher.app 域）
+    let gui = UserDefaults(suiteName: "com.musicdacswitcher.app")
+    let real = HearingGuard.Params(
+        sensitivity: gui?.object(forKey: "mds.hearing.sens") as? Double ?? params.sensitivity,
+        impedance: gui?.object(forKey: "mds.hearing.imp") as? Double ?? params.impedance,
+        maxVrms: gui?.object(forKey: "mds.hearing.vrms") as? Double ?? params.maxVrms,
+        threshold: gui?.object(forKey: "mds.hearing.threshold") as? Double ?? params.threshold,
+        crestDB: gui?.object(forKey: "mds.hearing.crest") as? Double ?? params.crestDB,
+        deviceAttenuationDB: gui?.object(forKey: "mds.hearing.atten") as? Double ?? params.deviceAttenuationDB)
+    let fromGUI = gui?.object(forKey: "mds.hearing.sens") != nil
+    if let peak = HearingGuard.estimatedSPL(volumeDB: db, params: real),
+       let avg = HearingGuard.averageSPL(peakSPL: peak, params: real) {
+        let verdict = HearingGuard.exceedsThreshold(spl: peak, params: real)
+            ? " → 平均已超过 \(Int(real.threshold)) dB 阈值 ⚠️" : ""
+        print(String(format: "估算声压: 峰值 ≤ %.1f · 平均 ≈ %.1f dB SPL（%@ %.0f dB/mW · %.0f Ω · %.1f Vrms · 峰值因子 %.0f · 机身衰减 %.0f dB）",
+                     peak, avg, fromGUI ? "面板参数" : "默认参数",
+                     real.sensitivity, real.impedance, real.maxVrms, real.crestDB,
+                     real.deviceAttenuationDB) + verdict)
+        print("提示: 峰值=满幅正弦等效上限，平均≈LAeq（告警口径）；机身旋钮控音量时在 GUI 面板填「机身衰减」；0 dB 音量 = 无衰减直通")
     }
 }
 

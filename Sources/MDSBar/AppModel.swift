@@ -88,7 +88,12 @@ final class AppModel: ObservableObject {
     @Published var crestDB: Double = AppModel.dblDefault("mds.hearing.crest", 12) {
         didSet { UserDefaults.standard.set(crestDB, forKey: "mds.hearing.crest") }
     }
-    /// 当前音量（dB，如 "-41.5 dB"；静音显示"静音"；无属性为 nil）
+    /// 机身音量旋钮衰减（dB，负值）：DAC 旋钮不联动系统音量（读数恒 0dB）时的
+    /// 手动补偿；0 = 机身全开，系统读数即全部衰减。屏显无 dB 时按听感粗校准
+    @Published var attenDB: Double = AppModel.dblDefault("mds.hearing.atten", 0) {
+        didSet { UserDefaults.standard.set(attenDB, forKey: "mds.hearing.atten") }
+    }
+    /// 当前有效衰减（dB，mac 读数 + 机身衰减，如 "-41.5 dB"；静音显示"静音"；无属性为 nil）
     @Published var volumeDBText: String?
     /// 峰值口径估算声压（满幅正弦等效，如 "≤ 93 dB SPL"；无法估算为 nil）
     @Published var peakSPLText: String?
@@ -100,7 +105,7 @@ final class AppModel: ObservableObject {
     var hearingParams: HearingGuard.Params {
         HearingGuard.Params(sensitivity: sensDB, impedance: impOhm,
                             maxVrms: maxVrms, threshold: thresholdDB,
-                            crestDB: crestDB)
+                            crestDB: crestDB, deviceAttenuationDB: attenDB)
     }
 
     private static func dblDefault(_ key: String, _ def: Double) -> Double {
@@ -362,7 +367,9 @@ final class AppModel: ObservableObject {
             if loud { loud = false; onLoudChange?(false) }
             return
         }
-        let newText = vol.muted ? "静音" : String(format: "%.1f dB", db)
+        // 读数显示有效衰减（mac 读数 + 机身衰减）：mac 拉满、机身旋钮控音量时
+        // 系统读数恒 0dB，读数即机身衰减的估计值
+        let newText = vol.muted ? "静音" : String(format: "%.1f dB", db + attenDB)
         if volumeDBText != newText { volumeDBText = newText }
 
         let params = hearingParams

@@ -401,6 +401,14 @@ public func runSelfTest() {
         // 非法参数 → 防除零
         expect("阻抗 0 → 返回 nil 不崩溃",
                HearingGuard.estimatedSPL(volumeDB: 0, params: HearingGuard.Params(impedance: 0)) == nil)
+        // 机身衰减：mac 读数 0dB（拉满）+ 机身 -41.5dB ≡ 系统音量 -41.5dB
+        let knob = HearingGuard.estimatedSPL(volumeDB: 0,
+                                             params: HearingGuard.Params(deviceAttenuationDB: -41.5))
+        expect("机身衰减 -41.5 dB 与系统音量 -41.5 dB 等效",
+               knob != nil && abs(knob! - cur!) < 1e-9)
+        // 机身衰减 0（默认）不改变结果
+        expect("机身衰减默认 0 → 不影响估算",
+               HearingGuard.estimatedSPL(volumeDB: -41.5, params: p)! == cur!)
     }
 
     print()

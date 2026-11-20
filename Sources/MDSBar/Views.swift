@@ -368,11 +368,14 @@ struct HearingCard: View {
                     HStack(spacing: 10) {
                         paramField("阈值 dB", $model.thresholdDB)
                         paramField("峰值因子 dB", $model.crestDB)
+                        paramField("机身衰减 dB", $model.attenDB)
                     }
-                    Text("SPL峰值 = 灵敏度 + 20·log₁₀(V) − 10·log₁₀(阻抗)，V = 满幅 × 10^(音量dB/20)；"
+                    Text("SPL峰值 = 灵敏度 + 20·log₁₀(V) − 10·log₁₀(阻抗)，V = 满幅 × 10^((音量+机身衰减)/20)；"
                          + "平均 = 峰值 − 峰值因子（流行 ~12 / 古典 ~18 / 纯音 0），告警按平均口径。"
                          + "满幅电压随 DAC 增益档变化（如 TP55：高 4.2 / 低 2.1 Vrms），切档请同步修改。"
-                         + "估算非实测；参数查耳机与 DAC 规格书。")
+                         + "机身旋钮不联动系统音量时（mac 拉满、旋钮控音量，读数恒 0dB）填「机身衰减」（负值，0=全开）："
+                         + "旋钮无 dB 显示时按听感粗校准——临时降 mac 音量到与当前听感相同，"
+                         + "该读数即机身衰减的近似值。估算非实测；参数查耳机与 DAC 规格书。")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
