@@ -25,7 +25,7 @@ pkill -f "MusicDacSwitcher.app/Contents/MacOS"; open /Applications/MusicDacSwitc
 
 - `Sources/MDSKit` 核心库：`FormatMatcher`（纯函数决策）、`FormatController`
   （写入执行）、`Watcher`（调度中枢）、`SourceProbe`（fd 扫描 + 文件头探测）、
-  `DeviceWriteGuard`（稳定期/熔断，纯逻辑）
+  `DeviceWriteGuard`（稳定期/熔断，纯逻辑）、`HearingGuard`（听力保护声压估算，纯函数）
 - `Sources/mds` CLI；`Sources/MDSBar` GUI（不用 `@State`，见 docs/development.md）
 - 详细文档在 `docs/`：architecture（模块与参数表）、coreaudio（陷阱）、
   source-probe（探测与播放器矩阵）、development（构建与维护约定）
