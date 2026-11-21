@@ -99,8 +99,14 @@ final class AppModel: ObservableObject {
     @Published var peakSPLText: String?
     /// 平均口径估算声压（≈ LAeq，告警依据，如 "≈ 81 dB SPL"；无法估算为 nil）
     @Published var avgSPLText: String?
+    /// 当前曲目实测平均电平（如 "曲电平 −15.2 dBFS"；不可测/未播放为 nil）
+    @Published var trackLevelText: String?
     /// 估算声压当前是否超过阈值（平均口径）
     @Published var loud = false
+    /// 当前曲目实测平均电平（dBFS，负值，TrackLevelAnalyzer 后台产出）
+    private var trackRMS: Double?
+    /// 已分析（或分析中）的曲目路径，同曲不重复分析
+    private var trackAnalyzedPath: String?
 
     var hearingParams: HearingGuard.Params {
         HearingGuard.Params(sensitivity: sensDB, impedance: impOhm,
@@ -241,8 +247,36 @@ final class AppModel: ObservableObject {
         w.onPassiveChange = { [weak self] on in
             DispatchQueue.main.async { self?.passiveMode = on }
         }
+        w.onPlayingProbe = { [weak self] probe in
+            DispatchQueue.main.async { self?.handlePlayingProbe(probe) }
+        }
         watcher = w
         w.start()
+    }
+
+    /// 源探测到正在播放的文件（主线程）：后台解码实测曲目电平，
+    /// 供听力保护的平均口径折算（优于静态峰值因子参数）。切歌即重分析，
+    /// 结果按 path+mtime 缓存，同曲零重复解码。
+    private func handlePlayingProbe(_ probe: SourceProbe.Probe?) {
+        guard let probe else {
+            trackAnalyzedPath = nil
+            if trackRMS != nil { trackRMS = nil }
+            if trackLevelText != nil { trackLevelText = nil }
+            return
+        }
+        guard probe.path != trackAnalyzedPath else { return }
+        trackAnalyzedPath = probe.path
+        let path = probe.path
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let level = TrackLevelAnalyzer.analyze(path: path)
+            DispatchQueue.main.async {
+                guard let self, self.trackAnalyzedPath == path else { return } // 已切歌，丢弃
+                self.trackRMS = level?.rmsDB
+                let text = level.map { String(format: "曲电平 %.1f dBFS", $0.rmsDB) }
+                if self.trackLevelText != text { self.trackLevelText = text }
+                self.refresh(includeDevices: false) // 立即用新电平刷新估算
+            }
+        }
     }
 
     /// 解除稳定模式（用户确认设备已稳定后）
@@ -376,11 +410,12 @@ final class AppModel: ObservableObject {
         let peak = vol.muted ? nil : HearingGuard.estimatedSPL(volumeDB: db, params: params)
         let peakText = peak.map { String(format: "≤ %.0f dB SPL", $0) }
         if peakSPLText != peakText { peakSPLText = peakText }
-        let avg = HearingGuard.averageSPL(peakSPL: peak, params: params)
+        let avg = HearingGuard.averageSPL(peakSPL: peak, params: params, trackRMSDB: trackRMS)
         let avgText = avg.map { String(format: "≈ %.0f dB SPL", $0) }
         if avgSPLText != avgText { avgSPLText = avgText }
 
-        let isLoud = hearingEnabled && HearingGuard.exceedsThreshold(spl: peak, params: params)
+        let isLoud = hearingEnabled && HearingGuard.exceedsThreshold(spl: peak, params: params,
+                                                                     trackRMSDB: trackRMS)
         if isLoud != loud {
             loud = isLoud
             if isLoud {

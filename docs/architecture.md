@@ -16,7 +16,8 @@
 │  HearingGuard.swift  听力保护：音量→声压估算，峰值/平均双口径    │
 │  Watcher.swift       调度中枢：监听属性 / 防抖 / 探测定时器       │
 │  Log.swift           日志 sink（CLI→stdout，GUI→面板）           │
-│  SelfTest.swift      内置自测（68 项）                           │
+│  TrackLevel.swift   曲目电平分析（ExtAudioFile 解码实测 RMS/峰值，缓存） │
+│  SelfTest.swift      内置自测（70 项）                           │
 └──────────────────────────────────────────────────────────────────┘
         ▲                                        ▲
 Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）

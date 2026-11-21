@@ -409,6 +409,14 @@ public func runSelfTest() {
         // 机身衰减 0（默认）不改变结果
         expect("机身衰减默认 0 → 不影响估算",
                HearingGuard.estimatedSPL(volumeDB: -41.5, params: p)! == cur!)
+        // 实测曲目电平优先于静态峰值因子：-18 dBFS（轻录音）→ 87.5 − 18 = 69.5
+        expect("实测曲目电平 −18 dBFS 优先于峰值因子参数",
+               HearingGuard.averageSPL(peakSPL: cur, params: p, trackRMSDB: -18)
+                   .map { abs($0 - 69.5) < 0.5 } == true)
+        // 实测电平下的告警边界：−2 dBFS（重母带）→ 85.5 告警；−3 → 84.5 不告警
+        expect("实测电平 −2 dBFS → 告警；−3 → 不告警",
+               HearingGuard.exceedsThreshold(spl: cur, params: p, trackRMSDB: -2)
+                   && !HearingGuard.exceedsThreshold(spl: cur, params: p, trackRMSDB: -3))
     }
 
     print()

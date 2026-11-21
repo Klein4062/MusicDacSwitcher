@@ -72,6 +72,9 @@ public final class DeviceWatcher {
     public var playbackSettleSeconds: Double = 3
     /// 稳定模式变化回调（GUI 显示徽章/警告）
     public var onPassiveChange: ((Bool) -> Void)?
+    /// 源探测结果回调（watch 串行队列）：正在播放的文件，无播放/未探测到为 nil。
+    /// 与写格式解耦——供听力保护做实测曲目电平，hog/稳定期/自动切换关闭时同样有效
+    public var onPlayingProbe: ((SourceProbe.Probe?) -> Void)?
 
     private let queue = DispatchQueue(label: "mds.watch")
     private var listeners: [PropertyListener] = []
@@ -352,20 +355,15 @@ public final class DeviceWatcher {
 
     private func probeTick() {
         guard !stopped, probeEnabled, currentDevice != 0 else { return }
-        guard controller.enabled else { return }
         guard deviceStillPresent() else { return }
         let running = observeRunning()
         guard running else {
             // 无播放：清除探测状态，处理空闲恢复
             if lastProbeKey != nil { lastProbeKey = nil }
             nilStreak = 0
+            onPlayingProbe?(nil)
             handleIdleRestore()
             return
-        }
-        // 稳定（只读）模式 / 绑定稳定期 / 起播稳定期：不写格式
-        guard canWriteNow() else { return }
-        if let hog = AudioDevice.hogPID(currentDevice), hog != -1 {
-            return // 播放器独占（hog），由播放器自行管理格式
         }
         guard !probeBusy else { return }
 
@@ -385,8 +383,18 @@ public final class DeviceWatcher {
                 best = SourceProbe.pickPlaying(a: a, b: b)
             }
             self?.queue.async { [weak self] in
-                self?.probeBusy = false
-                self?.applyProbe(best)
+                guard let self, !self.stopped else { return }
+                self.probeBusy = false
+                // 探测结果先供听力保护（实测曲目电平），与是否写格式无关：
+                // hog 独占 / 自动切换关闭 / 稳定期时同样回调
+                self.onPlayingProbe?(best)
+                guard self.controller.enabled else { return }
+                // 稳定（只读）模式 / 绑定稳定期 / 起播稳定期：不写格式
+                guard self.canWriteNow() else { return }
+                if let hog = AudioDevice.hogPID(self.currentDevice), hog != -1 {
+                    return // 播放器独占（hog），由播放器自行管理格式
+                }
+                self.applyProbe(best)
             }
         }
     }

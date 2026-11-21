@@ -320,6 +320,10 @@ func cmdProbe(_ args: [String]) {
     }
     if let playing {
         print("\n决策: 跟随 \(playing.description)")
+        if let lv = TrackLevelAnalyzer.analyze(path: playing.path) {
+            print(String(format: "曲目电平: 平均 %.1f · 峰值 %.1f dBFS（听力保护按实测平均折算）",
+                         lv.rmsDB, lv.peakDB))
+        }
     } else {
         print("\n决策: 未发现读取活动（句柄均为残留），不切换")
     }

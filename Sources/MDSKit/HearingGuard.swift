@@ -65,16 +65,24 @@ public enum HearingGuard {
         return params.sensitivity + 10 * log10(milliwatts)
     }
 
-    /// 平均口径声压（≈ LAeq 等效）= 峰值 − 音乐峰值因子；峰值未知 → nil
-    public static func averageSPL(peakSPL: Double?, params: Params) -> Double? {
+    /// 平均口径声压（≈ LAeq 等效）= 峰值 − 音乐峰值因子；峰值未知 → nil。
+    /// trackRMSDB 为当前曲目的实测平均电平（dBFS，负值，TrackLevelAnalyzer 产出），
+    /// 提供时优先于 params.crestDB（实测 −22 dBFS 的古典即等效峰值因子 22）；
+    /// nil（DSD/流媒体/加密缓存/未播放）回退参数。
+    public static func averageSPL(peakSPL: Double?, params: Params,
+                                  trackRMSDB: Double? = nil) -> Double? {
         guard let peakSPL else { return nil }
-        return peakSPL - params.crestDB
+        let crest = trackRMSDB.map { max(-$0, 0) } ?? params.crestDB
+        return peakSPL - crest
     }
 
     /// 估算声压是否超过告警阈值。对**平均口径**判定（听力限值是 LAeq 口径）；
     /// 无法估算时视为未超。
-    public static func exceedsThreshold(spl: Double?, params: Params) -> Bool {
-        guard let avg = averageSPL(peakSPL: spl, params: params) else { return false }
+    public static func exceedsThreshold(spl: Double?, params: Params,
+                                        trackRMSDB: Double? = nil) -> Bool {
+        guard let avg = averageSPL(peakSPL: spl, params: params, trackRMSDB: trackRMSDB) else {
+            return false
+        }
         return avg > params.threshold
     }
 }
