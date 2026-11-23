@@ -82,14 +82,15 @@ public final class HearingLog {
         guard secs >= 5, energy > 0 else { return } // 过短的噪声桶丢弃
         let entry = Entry(t: start.timeIntervalSince1970, s: secs,
                           l: 10 * log10(energy / secs))
-        ioQueue.async { [url] in
+        ioQueue.async { [weak self, url] in
             try? FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             guard let data = try? JSONEncoder().encode(entry),
                   let line = String(data: data, encoding: .utf8) else { return }
             try? (line + "\n").data(using: .utf8)?.append(to: url)
+            // 写盘完成后再通知重算——避免读到尚未落盘的行（首读竞态）
+            DispatchQueue.main.async { self?.onFlush?() }
         }
-        onFlush?()
     }
 
     // MARK: - 剂量计算（纯函数，自测覆盖）

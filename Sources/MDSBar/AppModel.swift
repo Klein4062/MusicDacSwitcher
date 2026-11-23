@@ -239,9 +239,12 @@ final class AppModel: ObservableObject {
     private func updateDoseText(_ dose: HearingLog.Dose?) {
         lastDose = dose
         let text = dose.map {
-            String(format: "近 7 天 %.0f%% · 等效 %.1fh / %.0fh @80dB · 实际聆听 %.1fh",
-                   min($0.percent, 999), $0.equivalentHours, HearingLog.referenceHours,
-                   $0.activeHours)
+            let eq = $0.equivalentHours < 1
+                ? String(format: "%.0f 分钟", $0.equivalentHours * 60)
+                : String(format: "%.1fh", $0.equivalentHours)
+            return String(format: "近 7 天 %.1f%% · 等效 %@ / %.0fh @80dB · 实际聆听 %.1fh",
+                          min($0.percent, 999), eq, HearingLog.referenceHours,
+                          $0.activeHours)
         }
         if weeklyDoseText != text { weeklyDoseText = text }
         updateDoseRemainText()
@@ -255,17 +258,14 @@ final class AppModel: ObservableObject {
             return
         }
         let remainPct = max(0, 100 - dose.percent)
+        guard let h = HearingLog.remainingHours(dose: dose, avgSPL: lastAvgSPL) else { return }
+        let hText = h >= 999 ? "999+ 小时" : String(format: "%.0f 小时", h)
         let text: String
-        if let h = HearingLog.remainingHours(dose: dose, avgSPL: lastAvgSPL) {
-            let hText = h >= 999 ? "999+ 小时" : String(format: "%.0f 小时", h)
-            if let avg = lastAvgSPL {
-                text = String(format: "剩余 %.0f%% · 当前 ≈%.0f dB 下约可再听 %@",
-                              remainPct, avg, hText)
-            } else {
-                text = String(format: "剩余 %.0f%%（80 dB 下 %@）", remainPct, hText)
-            }
+        if let avg = lastAvgSPL {
+            text = String(format: "剩余 %.1f%% · 当前 ≈%.0f dB 下约可再听 %@",
+                          remainPct, avg, hText)
         } else {
-            return
+            text = String(format: "剩余 %.1f%%（80 dB 下 %@）", remainPct, hText)
         }
         if doseRemainText != text { doseRemainText = text }
     }

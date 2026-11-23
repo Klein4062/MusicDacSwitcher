@@ -158,18 +158,21 @@ func cmdVol(_ args: [String]) {
         print("提示: 峰值=满幅正弦等效上限，平均≈LAeq（告警口径）；机身旋钮控音量时在 GUI 面板填「机身衰减」；0 dB 音量 = 无衰减直通")
     }
     if let dose = HearingLog.weeklyDose() {
-        print(String(format: "听力剂量: 近 7 天 %.0f%%（等效 %.1fh / %.0fh @80dB · 实际聆听 %.1fh）",
-                     dose.percent, dose.equivalentHours, HearingLog.referenceHours, dose.activeHours))
+        let eq = dose.equivalentHours < 1
+            ? String(format: "%.0f 分钟", dose.equivalentHours * 60)
+            : String(format: "%.1fh", dose.equivalentHours)
+        print(String(format: "听力剂量: 近 7 天 %.1f%%（等效 %@ / %.0fh @80dB · 实际聆听 %.1fh）",
+                     dose.percent, eq, HearingLog.referenceHours, dose.activeHours))
         let avg = HearingGuard.averageSPL(
             peakSPL: HearingGuard.estimatedSPL(volumeDB: vol.muted ? nil : db, params: real),
             params: real)
         if let h = HearingLog.remainingHours(dose: dose, avgSPL: avg) {
             let hText = h >= 999 ? "999+ 小时" : String(format: "%.0f 小时", h)
             if let avg {
-                print(String(format: "额度余额: 剩余 %.0f%% · 当前 ≈%.0f dB 下约可再听 %@",
+                print(String(format: "额度余额: 剩余 %.1f%% · 当前 ≈%.0f dB 下约可再听 %@",
                              max(0, 100 - dose.percent), avg, hText))
             } else {
-                print(String(format: "额度余额: 剩余 %.0f%%（80 dB 下 %@）",
+                print(String(format: "额度余额: 剩余 %.1f%%（80 dB 下 %@）",
                              max(0, 100 - dose.percent), hText))
             }
         }
