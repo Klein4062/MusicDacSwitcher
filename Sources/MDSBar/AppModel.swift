@@ -486,13 +486,14 @@ final class AppModel: ObservableObject {
         let avg = HearingGuard.averageSPL(peakSPL: peak, params: params, trackRMSDB: trackRMS)
         let avgText = avg.map { String(format: "≈ %.0f dB SPL", $0) }
         if avgSPLText != avgText { avgSPLText = avgText }
-        // 此刻声压：播放中随当前乐段电平起伏；静音显示"静音"；其余归 0
+        // 此刻声压：播放中随当前乐段电平起伏；静音显示"静音"；其余归 0。
+        // 行首恒以「此刻」锚定，无可测数据（未播放/流媒体/分析中）也保持前缀，便于辨认
         let live = HearingGuard.instantSPL(peakSPL: peak, instantRMSDB: instantRMSDB)
         let liveText: String
         if vol.muted {
-            liveText = "静音"
+            liveText = "此刻 0 dB（静音）"
         } else {
-            liveText = live.map { String(format: "此刻 ≈%.0f dB", $0) } ?? "0 dB"
+            liveText = live.map { String(format: "此刻 ≈%.0f dB", $0) } ?? "此刻 0 dB"
         }
         if liveSPLText != liveText { liveSPLText = liveText }
         let isLoud = hearingEnabled && HearingGuard.exceedsThreshold(spl: peak, params: params,

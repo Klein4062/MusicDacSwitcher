@@ -42,14 +42,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     override init() {
         super.init()
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform",
-                                    accessibilityDescription: "MusicDacSwitcher")
-            button.toolTip = "MusicDacSwitcher"
-            button.action = #selector(togglePopover(_:))
-            button.target = self
-        }
+        configureStatusItem()
 
         popover.behavior = .transient
         popover.delegate = self
@@ -66,6 +59,39 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
         model.start()
         updateIcon()
+        ensureStatusItemOnScreen()
+    }
+
+    /// 创建/重建状态栏图标（按钮配置统一在此，自愈重建时复用）
+    private func configureStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: "waveform",
+                                    accessibilityDescription: "MusicDacSwitcher")
+            button.toolTip = "MusicDacSwitcher"
+            button.action = #selector(togglePopover(_:))
+            button.target = self
+        }
+    }
+
+    /// 偶发自愈：菜单栏图标过多（刘海屏）时 NSStatusItem 可能静默不上屏——
+    /// 进程与事件循环都正常，但图标不存在，用户打不开面板（实测 2026-11-23）。
+    /// 系统不会自动腾位，移除后重建可重新排队。启动后校验几轮：
+    /// window 缺失或 frame 落在屏幕外即视为未上屏。误判代价仅图标闪一下，无害。
+    private func ensureStatusItemOnScreen(attempt: Int = 0) {
+        guard attempt < 4 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(2 * (attempt + 1))) { [weak self] in
+            guard let self, let button = self.statusItem?.button else { return }
+            let screenMaxX = NSScreen.screens.map { $0.frame.maxX }.max() ?? 0
+            let w = button.window
+            let offscreen = w == nil || w!.frame.maxX > screenMaxX + 1 || w!.frame.width <= 1
+            if offscreen {
+                NSStatusBar.system.removeStatusItem(self.statusItem)
+                self.configureStatusItem()
+                self.updateIcon()
+                self.ensureStatusItemOnScreen(attempt: attempt + 1)
+            }
+        }
     }
 
     private func updateIcon() {
