@@ -373,6 +373,12 @@ struct HearingCard: View {
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
+                    if let remain = model.doseRemainText {
+                        Text(remain)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 14)
+                    }
                 }
 
                 if model.hearingEnabled {

@@ -454,6 +454,14 @@ public func runSelfTest() {
         expect("JSONL 落盘往返 → 83 dB × 1h = 5%",
                d6 != nil && abs(d6!.percent - 5) < 0.05)
         try? FileManager.default.removeItem(at: tmp)
+        // 剩余额度换算：已用 50% + 当前 86dB → 剩 20 等效小时 × 10^(−0.6) ≈ 5.02h
+        let half = HearingLog.Dose(percent: 50, equivalentHours: 20, activeHours: 10)
+        let r = HearingLog.remainingHours(dose: half, avgSPL: 86)
+        expect("剩余额度按当前声压反解（50% 已用 · 86 dB ≈ 5h）",
+               r != nil && abs(r! - 5.02) < 0.1)
+        expect("无当前声压 → 80dB 基准口径 20h；无剂量 → nil",
+               HearingLog.remainingHours(dose: half, avgSPL: nil) == 20
+                   && HearingLog.remainingHours(dose: nil, avgSPL: 86) == nil)
     }
 
     print()

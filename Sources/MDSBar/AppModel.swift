@@ -111,6 +111,10 @@ final class AppModel: ObservableObject {
     private let hearingLog = HearingLog()
     /// 滚动 7 天听力剂量（如 "近 7 天 12% · 等效 4.9h/40h @80dB"；无记录为 nil）
     @Published var weeklyDoseText: String?
+    /// 剩余额度（如 "剩余 88% · 当前 ≈72 dB 下约可再听 999+ 小时"；无记录为 nil）
+    @Published var doseRemainText: String?
+    private var lastDose: HearingLog.Dose?
+    private var lastAvgSPL: Double?
 
     var hearingParams: HearingGuard.Params {
         HearingGuard.Params(sensitivity: sensDB, impedance: impOhm,
@@ -233,12 +237,37 @@ final class AppModel: ObservableObject {
     }
 
     private func updateDoseText(_ dose: HearingLog.Dose?) {
+        lastDose = dose
         let text = dose.map {
             String(format: "近 7 天 %.0f%% · 等效 %.1fh / %.0fh @80dB · 实际聆听 %.1fh",
                    min($0.percent, 999), $0.equivalentHours, HearingLog.referenceHours,
                    $0.activeHours)
         }
         if weeklyDoseText != text { weeklyDoseText = text }
+        updateDoseRemainText()
+    }
+
+    /// 剩余额度：按当前声压反解还能听多久（每 2s 随读数刷新）。
+    /// 低音量下时长按 3dB 一倍放大，超过 999h 显示 999+。
+    private func updateDoseRemainText() {
+        guard let dose = lastDose else {
+            if doseRemainText != nil { doseRemainText = nil }
+            return
+        }
+        let remainPct = max(0, 100 - dose.percent)
+        let text: String
+        if let h = HearingLog.remainingHours(dose: dose, avgSPL: lastAvgSPL) {
+            let hText = h >= 999 ? "999+ 小时" : String(format: "%.0f 小时", h)
+            if let avg = lastAvgSPL {
+                text = String(format: "剩余 %.0f%% · 当前 ≈%.0f dB 下约可再听 %@",
+                              remainPct, avg, hText)
+            } else {
+                text = String(format: "剩余 %.0f%%（80 dB 下 %@）", remainPct, hText)
+            }
+        } else {
+            return
+        }
+        if doseRemainText != text { doseRemainText = text }
     }
 
     /// 面板是否可见：呼吸灯等常驻动画只在可见时运行
@@ -437,6 +466,10 @@ final class AppModel: ObservableObject {
         let avg = HearingGuard.averageSPL(peakSPL: peak, params: params, trackRMSDB: trackRMS)
         let avgText = avg.map { String(format: "≈ %.0f dB SPL", $0) }
         if avgSPLText != avgText { avgSPLText = avgText }
+        if lastAvgSPL != avg {
+            lastAvgSPL = avg
+            updateDoseRemainText() // 剩余时长随当前声压实时刷新
+        }
 
         let isLoud = hearingEnabled && HearingGuard.exceedsThreshold(spl: peak, params: params,
                                                                      trackRMSDB: trackRMS)

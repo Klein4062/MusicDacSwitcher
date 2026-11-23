@@ -127,6 +127,16 @@ public final class HearingLog {
                                   now: Date = Date()) -> Dose? {
         weeklyDose(entries: loadEntries(from: url), now: now)
     }
+
+    /// 剩余额度在给定声压下的可听小时数（能量等效反解）：
+    /// 剩余等效小时 × 10^((80−L)/10)。avgSPL 为 nil 时按 80dB 基准口径；
+    /// 低于 80dB 时可听时长按 3dB 一倍放大。无剂量记录 → nil。
+    public static func remainingHours(dose: Dose?, avgSPL: Double?) -> Double? {
+        guard let dose else { return nil }
+        let remainEq = max(0, 1 - dose.percent / 100) * referenceHours
+        guard let avg = avgSPL, avg.isFinite else { return remainEq }
+        return remainEq * pow(10, (referenceDB - avg) / 10)
+    }
 }
 
 private extension Data {
