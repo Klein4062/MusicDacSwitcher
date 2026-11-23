@@ -113,6 +113,9 @@ final class AppModel: ObservableObject {
     @Published var weeklyDoseText: String?
     /// 剩余额度（如 "剩余 88% · 当前 ≈72 dB 下约可再听 999+ 小时"；无记录为 nil）
     @Published var doseRemainText: String?
+    /// 实时消耗速率（如 "实时 0.20 %/h · ≈69 dB"；无有效声压为 nil）。
+    /// 随音量与曲目电平每 2s 刷新，无需剂量历史
+    @Published var burnRateText: String?
     private var lastDose: HearingLog.Dose?
     private var lastAvgSPL: Double?
 
@@ -466,11 +469,6 @@ final class AppModel: ObservableObject {
         let avg = HearingGuard.averageSPL(peakSPL: peak, params: params, trackRMSDB: trackRMS)
         let avgText = avg.map { String(format: "≈ %.0f dB SPL", $0) }
         if avgSPLText != avgText { avgSPLText = avgText }
-        if lastAvgSPL != avg {
-            lastAvgSPL = avg
-            updateDoseRemainText() // 剩余时长随当前声压实时刷新
-        }
-
         let isLoud = hearingEnabled && HearingGuard.exceedsThreshold(spl: peak, params: params,
                                                                      trackRMSDB: trackRMS)
         if isLoud != loud {
@@ -482,6 +480,22 @@ final class AppModel: ObservableObject {
         }
         // 暴露历史：仅播放中且有估算声压时累计（周剂量数据源）
         hearingLog.record(avgSPL: avg, playing: isRunning)
+        if lastAvgSPL != avg {
+            lastAvgSPL = avg
+            updateDoseRemainText() // 剩余时长随当前声压实时刷新
+            updateBurnRateText()
+        }
+    }
+
+    /// 实时消耗速率（% 额度/小时）：随当前声压每 2s 跳动
+    private func updateBurnRateText() {
+        let text = HearingLog.burnRate(avgSPL: lastAvgSPL).map { rate -> String in
+            let avg = lastAvgSPL!
+            let rateText = rate < 0.1 ? String(format: "%.3f", rate)
+                : (rate < 10 ? String(format: "%.2f", rate) : String(format: "%.1f", rate))
+            return "实时 \(rateText) %/h · ≈\(Int(avg.rounded())) dB"
+        }
+        if burnRateText != text { burnRateText = text }
     }
 
     /// 能力列表 → 按采样率分组的矩阵行（降序）

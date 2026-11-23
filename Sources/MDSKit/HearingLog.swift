@@ -138,6 +138,13 @@ public final class HearingLog {
         guard let avg = avgSPL, avg.isFinite else { return remainEq }
         return remainEq * pow(10, (referenceDB - avg) / 10)
     }
+
+    /// 当前声压的实时剂量消耗速率（% 额度 / 小时）：100%/40h × 10^((L−80)/10)。
+    /// 80 dB = 2.5%/h，90 dB = 25%/h，69 dB ≈ 0.20%/h。无有效声压 → nil。
+    public static func burnRate(avgSPL: Double?) -> Double? {
+        guard let avg = avgSPL, avg.isFinite else { return nil }
+        return 100 / referenceHours * pow(10, (avg - referenceDB) / 10)
+    }
 }
 
 private extension Data {

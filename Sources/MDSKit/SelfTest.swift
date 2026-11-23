@@ -462,7 +462,13 @@ public func runSelfTest() {
         expect("无当前声压 → 80dB 基准口径 20h；无剂量 → nil",
                HearingLog.remainingHours(dose: half, avgSPL: nil) == 20
                    && HearingLog.remainingHours(dose: nil, avgSPL: 86) == nil)
-        // 桶落盘端到端（含首写建文件：FileHandle(forWritingTo:) 对不存在的文件会抛错）
+        // 实时消耗速率：80dB = 2.5%/h，90dB = 25%/h，69dB ≈ 0.198%/h
+        expect("实时速率 80 dB = 2.5%/h、90 dB = 25%/h",
+               abs(HearingLog.burnRate(avgSPL: 80)! - 2.5) < 0.01
+                   && abs(HearingLog.burnRate(avgSPL: 90)! - 25) < 0.1)
+        expect("实时速率 69 dB ≈ 0.198%/h；无有效声压 → nil",
+               abs(HearingLog.burnRate(avgSPL: 69)! - 0.198) < 0.01
+                   && HearingLog.burnRate(avgSPL: nil) == nil)        // 桶落盘端到端（含首写建文件：FileHandle(forWritingTo:) 对不存在的文件会抛错）
         let tmp2 = FileManager.default.temporaryDirectory
             .appendingPathComponent("mds-test-\(UUID().uuidString).jsonl")
         let log = HearingLog(url: tmp2)

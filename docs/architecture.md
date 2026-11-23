@@ -18,7 +18,7 @@
 │  Log.swift           日志 sink（CLI→stdout，GUI→面板）           │
 │  TrackLevel.swift   曲目电平分析（ExtAudioFile 解码实测 RMS/峰值，缓存） │
 │  HearingLog.swift   暴露历史落盘（5min 桶 JSONL）+ WHO 周剂量计算      │
-│  SelfTest.swift      内置自测（79 项）                           │
+│  SelfTest.swift      内置自测（81 项）                           │
 └──────────────────────────────────────────────────────────────────┘
         ▲                                        ▲
 Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）

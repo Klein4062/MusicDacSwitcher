@@ -180,6 +180,14 @@ func cmdVol(_ args: [String]) {
             print("提示: 已超过 WHO 周剂量参考（80dB×40h），建议控制高音量聆听时长")
         }
     }
+    if let rate = HearingLog.burnRate(
+        avgSPL: HearingGuard.averageSPL(
+            peakSPL: HearingGuard.estimatedSPL(volumeDB: vol.muted ? nil : db, params: real),
+            params: real)) {
+        let rateText = rate < 0.1 ? String(format: "%.3f", rate)
+            : (rate < 10 ? String(format: "%.2f", rate) : String(format: "%.1f", rate))
+        print(String(format: "实时消耗: %@ %%/h（当前声压口径，随音量与曲目电平变化）", rateText))
+    }
 }
 
 func cmdList(_ args: [String]) {
