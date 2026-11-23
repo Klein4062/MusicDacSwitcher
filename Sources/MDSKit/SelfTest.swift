@@ -462,6 +462,22 @@ public func runSelfTest() {
         expect("无当前声压 → 80dB 基准口径 20h；无剂量 → nil",
                HearingLog.remainingHours(dose: half, avgSPL: nil) == 20
                    && HearingLog.remainingHours(dose: nil, avgSPL: 86) == nil)
+        // 桶落盘端到端（含首写建文件：FileHandle(forWritingTo:) 对不存在的文件会抛错）
+        let tmp2 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mds-test-\(UUID().uuidString).jsonl")
+        let log = HearingLog(url: tmp2)
+        let t0 = Date()
+        for i in 0...152 { log.record(avgSPL: 80, playing: true,
+                                      at: t0.addingTimeInterval(Double(i) * 2)) }
+        var written = false
+        for _ in 0..<30 where !written {
+            written = FileManager.default.fileExists(atPath: tmp2.path)
+            if !written { Thread.sleep(forTimeInterval: 0.1) }
+        }
+        expect("桶满 5 分钟落盘且首写自动建文件",
+               written && HearingLog.weeklyDose(fromFile: tmp2,
+                                                now: t0.addingTimeInterval(3600)) != nil)
+        try? FileManager.default.removeItem(at: tmp2)
     }
 
     print()

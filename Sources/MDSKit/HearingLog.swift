@@ -141,6 +141,12 @@ public final class HearingLog {
 
 private extension Data {
     func append(to url: URL) throws {
+        // FileHandle(forWritingTo:) 在文件不存在时抛错——首次写入前必须建文件
+        if !FileManager.default.fileExists(atPath: url.path) {
+            guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError)
+            }
+        }
         let fh = try FileHandle(forWritingTo: url)
         defer { try? fh.close() }
         fh.seekToEndOfFile()
