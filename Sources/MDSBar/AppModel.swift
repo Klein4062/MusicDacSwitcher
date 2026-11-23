@@ -319,15 +319,26 @@ final class AppModel: ObservableObject {
     /// 源探测到正在播放的文件（主线程）：后台解码实测曲目电平（含 10s 分段表），
     /// 供听力保护的平均口径折算与「此刻声压」按播放位置取段。
     /// 切歌重分析（path+mtime 缓存）；同曲每 4s 跟随 offset 刷新此刻段。
+    /// 探测靠 1.3s 双快照的读取偏移前进识别播放——播放器预读缓冲饱和时
+    /// 偏移短暂不动，会间歇误报"无播放"；短暂 nil（≤12s ≈ 3 个探测周期）
+    /// 保留曲目状态不清空，避免「此刻声压/曲电平」在可测与归零间摇摆。
+    private var probeNilSince: Date?
+
     private func handlePlayingProbe(_ probe: SourceProbe.Probe?) {
         guard let probe else {
-            trackAnalyzedPath = nil
-            trackLevelResult = nil
-            instantRMSDB = nil
-            if trackRMS != nil { trackRMS = nil }
-            if trackLevelText != nil { trackLevelText = nil }
+            if probeNilSince == nil {
+                probeNilSince = Date()
+            } else if Date().timeIntervalSince(probeNilSince!) > 12 {
+                probeNilSince = nil
+                trackAnalyzedPath = nil
+                trackLevelResult = nil
+                instantRMSDB = nil
+                if trackRMS != nil { trackRMS = nil }
+                if trackLevelText != nil { trackLevelText = nil }
+            }
             return
         }
+        probeNilSince = nil
         if probe.path == trackAnalyzedPath {
             // 同曲：只随 offset 前进更新「此刻」段
             if let cached = trackLevelResult {
@@ -488,8 +499,10 @@ final class AppModel: ObservableObject {
         if avgSPLText != avgText { avgSPLText = avgText }
         // 此刻声压：播放中随当前乐段电平起伏；停止归 0；播放中但曲目解不了
         // （网易云 .uc! 等加密缓存、流媒体）显示"不可测"而非误导性的 0。
-        // 行首恒以「此刻」锚定，便于辨认
-        let live = HearingGuard.instantSPL(peakSPL: peak, instantRMSDB: instantRMSDB)
+        // 行首恒以「此刻」锚定，便于辨认。停止以 CoreAudio 播放状态为准
+        // （即时），不受探测宽限期的残留分段影响
+        let live = isRunning
+            ? HearingGuard.instantSPL(peakSPL: peak, instantRMSDB: instantRMSDB) : nil
         let liveText: String
         if vol.muted {
             liveText = "此刻 0 dB（静音）"
