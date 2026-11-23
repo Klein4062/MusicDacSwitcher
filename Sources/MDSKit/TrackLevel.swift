@@ -19,6 +19,14 @@ public enum TrackLevelAnalyzer {
         public let rmsDB: Double
         /// 全文件真峰值近似（dBFS，≤ 0）
         public let peakDB: Double
+        /// 总时长（秒）
+        public let durationSec: Double
+        /// 分段长度（秒，固定 10）
+        public let segmentSec: Double
+        /// 按播放顺序的分段 RMS（dBFS），供「此刻声压」按位置取用
+        public let segments: [Double]
+        /// 文件字节数（配合 fd 读取偏移估算播放位置）
+        public let fileSize: UInt64
     }
 
     /// 分析结果缓存（线程安全；进程内存级，重启即清）
@@ -77,6 +85,11 @@ public enum TrackLevelAnalyzer {
         var peak: Double = 0
         var sumSq: Double = 0
         var sampleCount: Double = 0
+        // 分段累计（每 10s 一段，块粒度切分，边界误差 ≤1.4s 可忽略）
+        var segments: [Double] = []
+        var segStart = 0.0
+        var segEnergy = 0.0
+        let segTarget = fileFormat.mSampleRate * 10 * Double(fileFormat.mChannelsPerFrame)
 
         while true {
             var got = framesPerRead
@@ -90,22 +103,51 @@ public enum TrackLevelAnalyzer {
             }
             guard ok, got > 0 else { break }
             let n = Int(got) * Int(client.mChannelsPerFrame)
+            var blockSumSq = 0.0
             buffer.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
                 let samples = raw.bindMemory(to: Float.self).prefix(n)
                 for s in samples {
                     let v = Double(s)
                     let a = abs(v)
                     if a > peak { peak = a }
-                    sumSq += v * v
+                    blockSumSq += v * v
                 }
             }
+            sumSq += blockSumSq
+            segEnergy += blockSumSq
             sampleCount += Double(n)
+            if sampleCount - segStart >= segTarget {
+                segments.append(10 * log10(segEnergy / (sampleCount - segStart)))
+                segStart = sampleCount
+                segEnergy = 0
+            }
         }
 
         guard sampleCount > 0, peak > 0 else { return nil }
+        // 尾段（≥1/3 段长才算数）
+        let tailLen = sampleCount - segStart
+        if tailLen >= segTarget / 3, segEnergy > 0 {
+            segments.append(10 * log10(segEnergy / tailLen))
+        }
         let rms = sqrt(sumSq / sampleCount)
-        let result = Result(rmsDB: 20 * log10(rms), peakDB: 20 * log10(peak))
+        let fileBytes = ((try? FileManager.default.attributesOfItem(atPath: path))?
+            .first { $0.key == .size }?.value as? NSNumber)?.uint64Value ?? 0
+        let result = Result(rmsDB: 20 * log10(rms), peakDB: 20 * log10(peak),
+                            durationSec: sampleCount / Double(fileFormat.mChannelsPerFrame)
+                                / fileFormat.mSampleRate,
+                            segmentSec: 10, segments: segments, fileSize: fileBytes)
         cache.setObject(Box(mtime: mtime, result: result), forKey: path as NSString)
         return result
+    }
+
+    /// 由 fd 读取偏移（字节）估算播放位置，取所在分段的 RMS（「此刻声压」）。
+    /// 压缩格式字节偏移 ≠ 时间（近似线性映射），10 秒分段粒度下误差可接受。
+    public static func segmentRMS(_ result: Result, offsetBytes: UInt64?) -> Double? {
+        guard !result.segments.isEmpty, result.durationSec > 0,
+              let offset = offsetBytes, result.fileSize > 0 else { return nil }
+        let frac = min(max(Double(offset) / Double(result.fileSize), 0), 1)
+        let idx = min(Int(frac * result.durationSec / result.segmentSec),
+                      result.segments.count - 1)
+        return result.segments[idx]
     }
 }

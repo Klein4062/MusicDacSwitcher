@@ -85,4 +85,11 @@ public enum HearingGuard {
         }
         return avg > params.threshold
     }
+
+    /// 此刻声压 = 峰值口径 + 此刻信号电平（分段 RMS，dBFS 负值）：
+    /// 播放中随乐段起伏（安静乐章低、高潮高）。无即时数据 → nil（显示 0）。
+    public static func instantSPL(peakSPL: Double?, instantRMSDB: Double?) -> Double? {
+        guard let p = peakSPL, let r = instantRMSDB, r.isFinite else { return nil }
+        return p + r
+    }
 }

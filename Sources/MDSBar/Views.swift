@@ -363,11 +363,17 @@ struct HearingCard: View {
                 }
                 .font(.system(size: 10, design: .monospaced))
 
-                // 实时消耗速率：随音量/曲目电平每 2s 跳动
-                if let rate = model.burnRateText {
-                    Text(rate)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                // 此刻声压（随乐段起伏，停止归 0）+ 实时消耗速率
+                HStack(spacing: 6) {
+                    Text(model.liveSPLText)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    if let rate = model.burnRateText {
+                        Text("· \(rate)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer()
                 }
 
                 // 周剂量（WHO 80dB×40h 基准）：有历史记录才显示

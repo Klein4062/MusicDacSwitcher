@@ -468,7 +468,21 @@ public func runSelfTest() {
                    && abs(HearingLog.burnRate(avgSPL: 90)! - 25) < 0.1)
         expect("实时速率 69 dB ≈ 0.198%/h；无有效声压 → nil",
                abs(HearingLog.burnRate(avgSPL: 69)! - 0.198) < 0.01
-                   && HearingLog.burnRate(avgSPL: nil) == nil)        // 桶落盘端到端（含首写建文件：FileHandle(forWritingTo:) 对不存在的文件会抛错）
+                   && HearingLog.burnRate(avgSPL: nil) == nil)
+        // 此刻声压：分段 RMS 按字节偏移近似定位（0/中/满 → 段 0/1/2），无偏移 → nil
+        let seg = TrackLevelAnalyzer.Result(rmsDB: -20, peakDB: -3, durationSec: 30,
+                                            segmentSec: 10, segments: [-10, -20, -30],
+                                            fileSize: 1000)
+        expect("分段 RMS 位置映射：头/中/尾 → −10/−20/−30 dBFS",
+               TrackLevelAnalyzer.segmentRMS(seg, offsetBytes: 0) == -10
+                   && TrackLevelAnalyzer.segmentRMS(seg, offsetBytes: 500) == -20
+                   && TrackLevelAnalyzer.segmentRMS(seg, offsetBytes: 999) == -30
+                   && TrackLevelAnalyzer.segmentRMS(seg, offsetBytes: nil) == nil)
+        expect("此刻声压 = 峰值口径 + 此刻电平（87.5 − 30 = 57.5）；缺数据 → nil",
+               HearingGuard.instantSPL(peakSPL: 87.5, instantRMSDB: -30) == 57.5
+                   && HearingGuard.instantSPL(peakSPL: nil, instantRMSDB: -30) == nil
+                   && HearingGuard.instantSPL(peakSPL: 87.5, instantRMSDB: nil) == nil)
+        // 桶落盘端到端（含首写建文件：FileHandle(forWritingTo:) 对不存在的文件会抛错）
         let tmp2 = FileManager.default.temporaryDirectory
             .appendingPathComponent("mds-test-\(UUID().uuidString).jsonl")
         let log = HearingLog(url: tmp2)

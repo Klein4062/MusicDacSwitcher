@@ -107,6 +107,12 @@ final class AppModel: ObservableObject {
     private var trackRMS: Double?
     /// 已分析（或分析中）的曲目路径，同曲不重复分析
     private var trackAnalyzedPath: String?
+    /// 当前曲目完整分析结果（分段表在此）
+    private var trackLevelResult: TrackLevelAnalyzer.Result?
+    /// 此刻播放位置的段落电平（dBFS）：随 offset 每 4s 刷新
+    private var instantRMSDB: Double?
+    /// 此刻声压（如 "此刻 ≈76 dB"；停止播放显示 "0 dB"）
+    @Published var liveSPLText = "0 dB"
     /// 暴露历史（周剂量数据源）
     private let hearingLog = HearingLog()
     /// 滚动 7 天听力剂量（如 "近 7 天 12% · 等效 4.9h/40h @80dB"；无记录为 nil）
@@ -310,24 +316,35 @@ final class AppModel: ObservableObject {
         w.start()
     }
 
-    /// 源探测到正在播放的文件（主线程）：后台解码实测曲目电平，
-    /// 供听力保护的平均口径折算（优于静态峰值因子参数）。切歌即重分析，
-    /// 结果按 path+mtime 缓存，同曲零重复解码。
+    /// 源探测到正在播放的文件（主线程）：后台解码实测曲目电平（含 10s 分段表），
+    /// 供听力保护的平均口径折算与「此刻声压」按播放位置取段。
+    /// 切歌重分析（path+mtime 缓存）；同曲每 4s 跟随 offset 刷新此刻段。
     private func handlePlayingProbe(_ probe: SourceProbe.Probe?) {
         guard let probe else {
             trackAnalyzedPath = nil
+            trackLevelResult = nil
+            instantRMSDB = nil
             if trackRMS != nil { trackRMS = nil }
             if trackLevelText != nil { trackLevelText = nil }
             return
         }
-        guard probe.path != trackAnalyzedPath else { return }
+        if probe.path == trackAnalyzedPath {
+            // 同曲：只随 offset 前进更新「此刻」段
+            if let cached = trackLevelResult {
+                instantRMSDB = TrackLevelAnalyzer.segmentRMS(cached, offsetBytes: probe.offset)
+            }
+            return
+        }
         trackAnalyzedPath = probe.path
         let path = probe.path
+        let offset = probe.offset
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let level = TrackLevelAnalyzer.analyze(path: path)
             DispatchQueue.main.async {
                 guard let self, self.trackAnalyzedPath == path else { return } // 已切歌，丢弃
+                self.trackLevelResult = level
                 self.trackRMS = level?.rmsDB
+                self.instantRMSDB = level.flatMap { TrackLevelAnalyzer.segmentRMS($0, offsetBytes: offset) }
                 let text = level.map { String(format: "曲电平 %.1f dBFS", $0.rmsDB) }
                 if self.trackLevelText != text { self.trackLevelText = text }
                 self.refresh(includeDevices: false) // 立即用新电平刷新估算
@@ -469,6 +486,15 @@ final class AppModel: ObservableObject {
         let avg = HearingGuard.averageSPL(peakSPL: peak, params: params, trackRMSDB: trackRMS)
         let avgText = avg.map { String(format: "≈ %.0f dB SPL", $0) }
         if avgSPLText != avgText { avgSPLText = avgText }
+        // 此刻声压：播放中随当前乐段电平起伏；静音显示"静音"；其余归 0
+        let live = HearingGuard.instantSPL(peakSPL: peak, instantRMSDB: instantRMSDB)
+        let liveText: String
+        if vol.muted {
+            liveText = "静音"
+        } else {
+            liveText = live.map { String(format: "此刻 ≈%.0f dB", $0) } ?? "0 dB"
+        }
+        if liveSPLText != liveText { liveSPLText = liveText }
         let isLoud = hearingEnabled && HearingGuard.exceedsThreshold(spl: peak, params: params,
                                                                      trackRMSDB: trackRMS)
         if isLoud != loud {
@@ -493,7 +519,7 @@ final class AppModel: ObservableObject {
             let avg = lastAvgSPL!
             let rateText = rate < 0.1 ? String(format: "%.3f", rate)
                 : (rate < 10 ? String(format: "%.2f", rate) : String(format: "%.1f", rate))
-            return "实时 \(rateText) %/h · ≈\(Int(avg.rounded())) dB"
+            return "实时 \(rateText) %/h · 均值 ≈\(Int(avg.rounded())) dB"
         }
         if burnRateText != text { burnRateText = text }
     }
