@@ -17,7 +17,8 @@
 │  Watcher.swift       调度中枢：监听属性 / 防抖 / 探测定时器       │
 │  Log.swift           日志 sink（CLI→stdout，GUI→面板）           │
 │  TrackLevel.swift   曲目电平分析（ExtAudioFile 解码实测 RMS/峰值，缓存） │
-│  SelfTest.swift      内置自测（70 项）                           │
+│  HearingLog.swift   暴露历史落盘（5min 桶 JSONL）+ WHO 周剂量计算      │
+│  SelfTest.swift      内置自测（76 项）                           │
 └──────────────────────────────────────────────────────────────────┘
         ▲                                        ▲
 Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）

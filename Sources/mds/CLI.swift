@@ -157,6 +157,13 @@ func cmdVol(_ args: [String]) {
                      real.deviceAttenuationDB) + verdict)
         print("提示: 峰值=满幅正弦等效上限，平均≈LAeq（告警口径）；机身旋钮控音量时在 GUI 面板填「机身衰减」；0 dB 音量 = 无衰减直通")
     }
+    if let dose = HearingLog.weeklyDose() {
+        print(String(format: "听力剂量: 近 7 天 %.0f%%（等效 %.1fh / %.0fh @80dB · 实际聆听 %.1fh）",
+                     dose.percent, dose.equivalentHours, HearingLog.referenceHours, dose.activeHours))
+        if dose.percent > 100 {
+            print("提示: 已超过 WHO 周剂量参考（80dB×40h），建议控制高音量聆听时长")
+        }
+    }
 }
 
 func cmdList(_ args: [String]) {

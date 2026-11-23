@@ -419,6 +419,43 @@ public func runSelfTest() {
                    && !HearingGuard.exceedsThreshold(spl: cur, params: p, trackRMSDB: -3))
     }
 
+    // MARK: - 周剂量（HearingLog，WHO 80dB×40h/周 基准，3dB 交换率）
+    do {
+        let h = 3600.0
+        let now = Date()
+        func entry(_ l: Double, _ s: Double, ago: Double = 0) -> HearingLog.Entry {
+            .init(t: now.timeIntervalSince1970 - ago, s: s, l: l)
+        }
+        // 80dB×1h → 1 等效小时 → 40h 基准的 2.5%
+        let d1 = HearingLog.weeklyDose(entries: [entry(80, h)], now: now)
+        expect("80 dB × 1h → 周剂量 2.5%",
+               d1 != nil && abs(d1!.percent - 2.5) < 0.01)
+        // 90dB×1h：能量×10 → 10 等效小时 → 25%
+        let d2 = HearingLog.weeklyDose(entries: [entry(90, h)], now: now)
+        expect("90 dB × 1h → 周剂量 25%",
+               d2 != nil && abs(d2!.percent - 25) < 0.05)
+        // 83dB×1h：能量×2 → 5%
+        let d3 = HearingLog.weeklyDose(entries: [entry(83, h)], now: now)
+        expect("83 dB × 1h → 周剂量 5%",
+               d3 != nil && abs(d3!.percent - 5) < 0.05)
+        // 77dB×4h → 2 等效小时 → 5%（交换率向下对称）
+        let d4 = HearingLog.weeklyDose(entries: [entry(77, 4 * h)], now: now)
+        expect("77 dB × 4h → 周剂量 5%",
+               d4 != nil && abs(d4!.percent - 5) < 0.05)
+        // 滚动窗口外（8 天前）不计入
+        let d5 = HearingLog.weeklyDose(entries: [entry(90, h, ago: 8 * 86400)], now: now)
+        expect("8 天前的暴露不计入滚动周", d5 == nil)
+        // JSONL 落盘往返解析
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mds-test-\(UUID().uuidString).jsonl")
+        let jsonl = "{\"t\":\(now.timeIntervalSince1970 - 60),\"s\":3600,\"l\":83}\n"
+        try? jsonl.data(using: .utf8)?.write(to: tmp)
+        let d6 = HearingLog.weeklyDose(fromFile: tmp, now: now)
+        expect("JSONL 落盘往返 → 83 dB × 1h = 5%",
+               d6 != nil && abs(d6!.percent - 5) < 0.05)
+        try? FileManager.default.removeItem(at: tmp)
+    }
+
     print()
     print("结果: \(passCount) 通过, \(failCount) 失败")
     if failCount > 0 { exit(1) }

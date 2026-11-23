@@ -363,6 +363,18 @@ struct HearingCard: View {
                 }
                 .font(.system(size: 10, design: .monospaced))
 
+                // 周剂量（WHO 80dB×40h 基准）：有历史记录才显示
+                if let dose = model.weeklyDoseText {
+                    HStack(spacing: 4) {
+                        Label("听力剂量", systemImage: "chart.pie")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Text(dose)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 if model.hearingEnabled {
                     HStack(spacing: 10) {
                         paramField("灵敏度 dB/mW", $model.sensDB)
@@ -380,7 +392,9 @@ struct HearingCard: View {
                          + "满幅电压随 DAC 增益档变化（如 TP55：高 4.2 / 低 2.1 Vrms），切档请同步修改。"
                          + "机身旋钮不联动系统音量时（mac 拉满、旋钮控音量，读数恒 0dB）填「机身衰减」（负值，0=全开）："
                          + "旋钮无 dB 显示时按听感粗校准——临时降 mac 音量到与当前听感相同，"
-                         + "该读数即机身衰减的近似值。估算非实测；参数查耳机与 DAC 规格书。")
+                         + "该读数即机身衰减的近似值。"
+                         + "听力剂量按 WHO 80dB×40h/周 = 100%、3dB 交换率累计（90dB 听 1h 即 25%），"
+                         + "滚动最近 7 天，仅统计播放中的估算平均声压。估算非实测；参数查耳机与 DAC 规格书。")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)

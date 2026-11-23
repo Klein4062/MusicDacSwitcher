@@ -107,6 +107,10 @@ final class AppModel: ObservableObject {
     private var trackRMS: Double?
     /// 已分析（或分析中）的曲目路径，同曲不重复分析
     private var trackAnalyzedPath: String?
+    /// 暴露历史（周剂量数据源）
+    private let hearingLog = HearingLog()
+    /// 滚动 7 天听力剂量（如 "近 7 天 12% · 等效 4.9h/40h @80dB"；无记录为 nil）
+    @Published var weeklyDoseText: String?
 
     var hearingParams: HearingGuard.Params {
         HearingGuard.Params(sensitivity: sensDB, impedance: impOhm,
@@ -209,12 +213,32 @@ final class AppModel: ObservableObject {
 
     func start() {
         rebuildWatcher()
+        // 周剂量：启动加载历史，之后每次桶落盘（5 分钟粒度）重算
+        hearingLog.onFlush = { [weak self] in self?.reloadWeeklyDose() }
+        reloadWeeklyDose()
         let t = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh(includeDevices: false) }
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
         refresh()
+    }
+
+    /// 后台重算滚动 7 天听力剂量并更新展示
+    private func reloadWeeklyDose() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let dose = HearingLog.weeklyDose()
+            DispatchQueue.main.async { self?.updateDoseText(dose) }
+        }
+    }
+
+    private func updateDoseText(_ dose: HearingLog.Dose?) {
+        let text = dose.map {
+            String(format: "近 7 天 %.0f%% · 等效 %.1fh / %.0fh @80dB · 实际聆听 %.1fh",
+                   min($0.percent, 999), $0.equivalentHours, HearingLog.referenceHours,
+                   $0.activeHours)
+        }
+        if weeklyDoseText != text { weeklyDoseText = text }
     }
 
     /// 面板是否可见：呼吸灯等常驻动画只在可见时运行
@@ -423,6 +447,8 @@ final class AppModel: ObservableObject {
             }
             onLoudChange?(isLoud)
         }
+        // 暴露历史：仅播放中且有估算声压时累计（周剂量数据源）
+        hearingLog.record(avgSPL: avg, playing: isRunning)
     }
 
     /// 能力列表 → 按采样率分组的矩阵行（降序）
