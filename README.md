@@ -64,7 +64,7 @@ mds set 48000 --device LEN  # 按 UID / 名称片段指定设备
 mds watch [--device TP55] [--restore-rate 44100] [--dry-run] [-v]
                             # 守护模式：播放即自动切换
 mds playtest <文件>         # 端到端验证（真实 IO + 静音播放）
-mds selftest                # 83 项内置自测
+mds selftest                # 86 项内置自测
 ```
 
 自动切换运行时日志示例：

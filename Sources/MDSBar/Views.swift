@@ -338,6 +338,36 @@ struct HearingCard: View {
                         .controlSize(.mini)
                         .labelsHidden()
                 }
+                // 耳机档案：按输出设备自动套用参数组合，也可手动切换
+                HStack(spacing: 6) {
+                    Menu {
+                        Button("手动参数") { model.selectProfile(nil) }
+                        Divider()
+                        ForEach(model.profiles) { p in
+                            Button(p.name) { model.selectProfile(p.id) }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.crop.circle")
+                            Text(model.activeProfile?.name ?? "手动参数")
+                                .lineLimit(1)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 8, weight: .bold))
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    Spacer()
+                    Text("跟随设备")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Toggle("", isOn: $model.autoProfile)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                        .help("输出设备切换时按设备名自动套用匹配的耳机档案")
+                }
+                .font(.system(size: 11, weight: .medium))
                 HStack(spacing: 6) {
                     if let vol = model.volumeDBText {
                         Text("音量 \(vol)")

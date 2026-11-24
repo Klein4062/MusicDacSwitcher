@@ -70,15 +70,24 @@ final class AppModel: ObservableObject {
     }
     /// 耳机灵敏度（dB/mW）
     @Published var sensDB: Double = AppModel.dblDefault("mds.hearing.sens", 108) {
-        didSet { UserDefaults.standard.set(sensDB, forKey: "mds.hearing.sens") }
+        didSet {
+            UserDefaults.standard.set(sensDB, forKey: "mds.hearing.sens")
+            syncProfileParams()
+        }
     }
     /// 耳机阻抗（Ω）
     @Published var impOhm: Double = AppModel.dblDefault("mds.hearing.imp", 32) {
-        didSet { UserDefaults.standard.set(impOhm, forKey: "mds.hearing.imp") }
+        didSet {
+            UserDefaults.standard.set(impOhm, forKey: "mds.hearing.imp")
+            syncProfileParams()
+        }
     }
     /// 输出口满幅电压（Vrms）
     @Published var maxVrms: Double = AppModel.dblDefault("mds.hearing.vrms", 2.0) {
-        didSet { UserDefaults.standard.set(maxVrms, forKey: "mds.hearing.vrms") }
+        didSet {
+            UserDefaults.standard.set(maxVrms, forKey: "mds.hearing.vrms")
+            syncProfileParams()
+        }
     }
     /// 告警阈值（dB SPL，平均口径）
     @Published var thresholdDB: Double = AppModel.dblDefault("mds.hearing.threshold", 85) {
@@ -91,7 +100,92 @@ final class AppModel: ObservableObject {
     /// 机身音量旋钮衰减（dB，负值）：DAC 旋钮不联动系统音量（读数恒 0dB）时的
     /// 手动补偿；0 = 机身全开，系统读数即全部衰减。屏显无 dB 时按听感粗校准
     @Published var attenDB: Double = AppModel.dblDefault("mds.hearing.atten", 0) {
-        didSet { UserDefaults.standard.set(attenDB, forKey: "mds.hearing.atten") }
+        didSet {
+            UserDefaults.standard.set(attenDB, forKey: "mds.hearing.atten")
+            syncProfileParams()
+        }
+    }
+
+    // MARK: - 耳机档案（按输出设备切换参数组合）
+
+    /// 档案列表（持久化 JSON；首次预置常用组合）
+    @Published var profiles: [HearingProfile] = AppModel.loadProfiles() {
+        didSet { persistProfiles() }
+    }
+    /// 输出设备切换时按设备名自动套用匹配档案
+    @Published var autoProfile: Bool =
+        (UserDefaults.standard.object(forKey: "mds.hearing.autoprofile") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(autoProfile, forKey: "mds.hearing.autoprofile") }
+    }
+    /// 当前生效档案（nil = 手动参数）
+    @Published var activeProfileID: UUID? =
+        UserDefaults.standard.string(forKey: "mds.hearing.profile").flatMap(UUID.init) {
+        didSet { UserDefaults.standard.set(activeProfileID?.uuidString, forKey: "mds.hearing.profile") }
+    }
+    /// selectProfile 批量赋值参数时抑制字段 didSet 回写档案
+    private var applyingProfile = false
+
+    /// 当前档案（无选中为 nil，用于界面显示）
+    var activeProfile: HearingProfile? {
+        profiles.first { $0.id == activeProfileID }
+    }
+
+    private static func loadProfiles() -> [HearingProfile] {
+        if let data = UserDefaults.standard.data(forKey: "mds.hearing.profiles"),
+           let ps = try? JSONDecoder().decode([HearingProfile].self, from: data),
+           !ps.isEmpty {
+            return ps
+        }
+        // 预置三套常用组合。HDB 630 为纯数字主动耳机（无模拟输入，
+        // THD 0.2% @105 dB SPL）：按「满幅声压 ≈110 dB + 数字音量衰减」
+        // 建模（sens=80/imp=1/vrms=1），听感偏差可在面板直接改并回存档案
+        return [
+            HearingProfile(name: "TP55 · 彼岸银翼", matchKeywords: ["tp55"],
+                           sensDB: 105, impOhm: 40, maxVrms: 2.1, attenDB: 0),
+            HearingProfile(name: "HDB 630 有线 USB-C", matchKeywords: ["hdb 630", "hdb630"],
+                           sensDB: 80, impOhm: 1, maxVrms: 1.0, attenDB: 0),
+            HearingProfile(name: "HDB 630 · BTD 700", matchKeywords: ["btd 700", "btd700"],
+                           sensDB: 80, impOhm: 1, maxVrms: 1.0, attenDB: 0),
+        ]
+    }
+
+    private func persistProfiles() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(profiles),
+                                  forKey: "mds.hearing.profiles")
+    }
+
+    /// 选用档案：载入参数（阈值/峰值因子为全局策略，不随档案）
+    func selectProfile(_ id: UUID?) {
+        activeProfileID = id
+        guard let p = profiles.first(where: { $0.id == id }) else { return }
+        applyingProfile = true
+        defer { applyingProfile = false }
+        sensDB = p.sensDB
+        impOhm = p.impOhm
+        maxVrms = p.maxVrms
+        attenDB = p.attenDB
+    }
+
+    /// 参数字段被手动编辑时回写当前档案（下次切回即生效）
+    private func syncProfileParams() {
+        guard !applyingProfile, let id = activeProfileID,
+              let i = profiles.firstIndex(where: { $0.id == id }) else { return }
+        guard profiles[i].sensDB != sensDB || profiles[i].impOhm != impOhm
+                || profiles[i].maxVrms != maxVrms || profiles[i].attenDB != attenDB else { return }
+        profiles[i].sensDB = sensDB
+        profiles[i].impOhm = impOhm
+        profiles[i].maxVrms = maxVrms
+        profiles[i].attenDB = attenDB
+    }
+
+    /// 输出设备变化时自动跟随档案（仅设备名变化那一刻触发，
+    /// 避免覆盖用户手动选择）
+    private func autoFollowProfile(deviceName: String) {
+        guard autoProfile,
+              let hit = HearingProfile.match(profiles, deviceName: deviceName),
+              hit.id != activeProfileID else { return }
+        log("🎧 输出设备「\(deviceName)」→ 自动套用档案「\(hit.name)」")
+        selectProfile(hit.id)
     }
     /// 当前有效衰减（dB，mac 读数 + 机身衰减，如 "-41.5 dB"；静音显示"静音"；无属性为 nil）
     @Published var volumeDBText: String?
@@ -318,7 +412,11 @@ final class AppModel: ObservableObject {
 
     /// 源探测到正在播放的文件（主线程）：后台解码实测曲目电平（含 10s 分段表），
     /// 供听力保护的平均口径折算与「此刻声压」按播放位置取段。
-    /// 切歌重分析（path+mtime 缓存）；同曲每 4s 跟随 offset 刷新此刻段。
+    /// 切歌重分析（组 key+mtime 缓存）；同曲每 4s 跟随 offset 刷新此刻段。
+    /// Sony 等播放器把曲库切成 ~10s 编号分片（<曲目ID>/001.flac…）：
+    /// 分析按分片组聚合成整曲电平与分段表，播放位置换算全局偏移取段
+    /// （否则"平均"退化为 10 秒片电平、「此刻」恒等于「平均」）；
+    /// 同曲判定用归一化组标识——分片前进不触发重分析。
     /// 探测靠 1.3s 双快照的读取偏移前进识别播放——播放器预读缓冲饱和时
     /// 偏移短暂不动，会间歇误报"无播放"；短暂 nil（≤12s ≈ 3 个探测周期）
     /// 保留曲目状态不清空，避免「此刻声压/曲电平」在可测与归零间摇摆。
@@ -339,23 +437,27 @@ final class AppModel: ObservableObject {
             return
         }
         probeNilSince = nil
-        if probe.path == trackAnalyzedPath {
-            // 同曲：只随 offset 前进更新「此刻」段
+        let key = TrackLevelAnalyzer.canonicalPath(probe.path)
+        let globalOffset = TrackLevelAnalyzer.globalOffsetBytes(path: probe.path,
+                                                                offsetBytes: probe.offset)
+        if key == trackAnalyzedPath {
+            // 同曲：只随全局 offset 前进更新「此刻」段
             if let cached = trackLevelResult {
-                instantRMSDB = TrackLevelAnalyzer.segmentRMS(cached, offsetBytes: probe.offset)
+                instantRMSDB = TrackLevelAnalyzer.segmentRMS(cached, offsetBytes: globalOffset)
             }
             return
         }
-        trackAnalyzedPath = probe.path
+        trackAnalyzedPath = key
         let path = probe.path
-        let offset = probe.offset
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let level = TrackLevelAnalyzer.analyze(path: path)
+            let level = TrackLevelAnalyzer.analyze(path: path) // 分片组内自动聚合
             DispatchQueue.main.async {
-                guard let self, self.trackAnalyzedPath == path else { return } // 已切歌，丢弃
+                guard let self, self.trackAnalyzedPath == key else { return } // 已切歌，丢弃
                 self.trackLevelResult = level
                 self.trackRMS = level?.rmsDB
-                self.instantRMSDB = level.flatMap { TrackLevelAnalyzer.segmentRMS($0, offsetBytes: offset) }
+                self.instantRMSDB = level.flatMap {
+                    TrackLevelAnalyzer.segmentRMS($0, offsetBytes: globalOffset)
+                }
                 let text = level.map { String(format: "曲电平 %.1f dBFS", $0.rmsDB) }
                 if self.trackLevelText != text { self.trackLevelText = text }
                 self.refresh(includeDevices: false) // 立即用新电平刷新估算
@@ -456,7 +558,10 @@ final class AppModel: ObservableObject {
             isRunning = snap.runningSomewhere
             onRunningChange?(isRunning)
         }
-        if deviceName != snap.name { deviceName = snap.name }
+        if deviceName != snap.name {
+            deviceName = snap.name
+            autoFollowProfile(deviceName: snap.name)
+        }
         let hogged = (snap.hogPID ?? -1) != -1
         if isHogged != hogged { isHogged = hogged }
         if let cur = snap.streams.first?.physical {

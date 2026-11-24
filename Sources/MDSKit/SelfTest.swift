@@ -482,6 +482,56 @@ public func runSelfTest() {
                HearingGuard.instantSPL(peakSPL: 87.5, instantRMSDB: -30) == 57.5
                    && HearingGuard.instantSPL(peakSPL: nil, instantRMSDB: -30) == nil
                    && HearingGuard.instantSPL(peakSPL: 87.5, instantRMSDB: nil) == nil)
+        // 耳机档案匹配：关键词不区分大小写、含厂商名命中、空设备名 → nil
+        let prof = HearingProfile(name: "TP55 · 彼岸银翼", matchKeywords: ["tp55"],
+                                  sensDB: 105, impOhm: 40, maxVrms: 2.1, attenDB: 0)
+        expect("档案按设备名匹配（大小写/厂商名前缀无关）；空名 → nil",
+               HearingProfile.match([prof], deviceName: "TP55 — Topping")?.name == prof.name
+                   && HearingProfile.match([prof], deviceName: "tp55 usb")?.name == prof.name
+                   && HearingProfile.match([prof], deviceName: "MacBook Pro扬声器") == nil
+                   && HearingProfile.match([prof], deviceName: nil) == nil
+                   && HearingProfile.match([], deviceName: "TP55") == nil)
+        // 分片组聚合：临时目录造 3 片编号 WAV（各 5s/8kHz/振幅 0.5、1.0、0.25）
+        let shardDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mds-shard-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: shardDir, withIntermediateDirectories: true)
+        func makeShard(_ name: String, amp: Float) {
+            let rate = 8000, n = rate * 5
+            var pcm = Data(capacity: 44 + n * 2)
+            func le16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { pcm.append(contentsOf: $0) } }
+            func le32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { pcm.append(contentsOf: $0) } }
+            pcm.append(contentsOf: Array("RIFF".utf8)); le32(UInt32(36 + n * 2))
+            pcm.append(contentsOf: Array("WAVE".utf8))
+            pcm.append(contentsOf: Array("fmt ".utf8)); le32(16); le16(1); le16(1)
+            le32(UInt32(rate)); le32(UInt32(rate * 2)); le16(2); le16(16)
+            pcm.append(contentsOf: Array("data".utf8)); le32(UInt32(n * 2))
+            for i in 0..<n {
+                let s = Int16(Float(Int16.max) * amp * sin(2 * .pi * 440 * Float(i) / Float(rate)))
+                withUnsafeBytes(of: s.littleEndian) { pcm.append(contentsOf: $0) }
+            }
+            try? pcm.write(to: shardDir.appendingPathComponent(name))
+        }
+        makeShard("001.wav", amp: 0.5)
+        makeShard("002.wav", amp: 1.0)
+        makeShard("003.wav", amp: 0.25)
+        let p1 = shardDir.appendingPathComponent("001.wav").path
+        let p2 = shardDir.appendingPathComponent("002.wav").path
+        let size1 = ((try? FileManager.default.attributesOfItem(atPath: p1))?
+            .first { $0.key == .size }?.value as? NSNumber)?.uint64Value ?? 0
+        expect("分片组检测：编号兄弟 ≥2 成组并排序；非编号名不成组",
+               TrackLevelAnalyzer.canonicalPath(p2).hasSuffix("001.wav")
+                   && TrackLevelAnalyzer.canonicalPath(p1) == TrackLevelAnalyzer.canonicalPath(p2)
+                   && TrackLevelAnalyzer.globalOffsetBytes(path: p2, offsetBytes: 100) == size1 + 100
+                   && TrackLevelAnalyzer.globalOffsetBytes(path: p2, offsetBytes: nil) == nil)
+        if let agg = TrackLevelAnalyzer.analyze(path: p2) { // 从中间片发起，聚合全组
+            expect("分片聚合分析：15s 整曲、跨片分段表、总字节累计",
+                   agg.durationSec > 14 && agg.durationSec < 16
+                       && agg.segments.count == 2
+                       && agg.fileSize > 3 * 40_000)
+        } else {
+            expect("分片聚合分析（WAV 生成失败？）", false)
+        }
+        try? FileManager.default.removeItem(at: shardDir)
         // 桶落盘端到端（含首写建文件：FileHandle(forWritingTo:) 对不存在的文件会抛错）
         let tmp2 = FileManager.default.temporaryDirectory
             .appendingPathComponent("mds-test-\(UUID().uuidString).jsonl")

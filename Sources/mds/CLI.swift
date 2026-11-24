@@ -137,16 +137,27 @@ func cmdVol(_ args: [String]) {
         return
     }
     let params = HearingGuard.Params()
-    // GUI 面板持久化的真实参数优先（写入 com.musicdacswitcher.app 域）
+    // GUI 面板持久化的真实参数优先（写入 com.musicdacswitcher.app 域）；
+    // 耳机档案按当前设备名匹配后覆盖前四项（与 GUI 自动跟随一致）
     let gui = UserDefaults(suiteName: "com.musicdacswitcher.app")
-    let real = HearingGuard.Params(
+    var real = HearingGuard.Params(
         sensitivity: gui?.object(forKey: "mds.hearing.sens") as? Double ?? params.sensitivity,
         impedance: gui?.object(forKey: "mds.hearing.imp") as? Double ?? params.impedance,
         maxVrms: gui?.object(forKey: "mds.hearing.vrms") as? Double ?? params.maxVrms,
         threshold: gui?.object(forKey: "mds.hearing.threshold") as? Double ?? params.threshold,
         crestDB: gui?.object(forKey: "mds.hearing.crest") as? Double ?? params.crestDB,
         deviceAttenuationDB: gui?.object(forKey: "mds.hearing.atten") as? Double ?? params.deviceAttenuationDB)
-    let fromGUI = gui?.object(forKey: "mds.hearing.sens") != nil
+    var fromGUI = gui?.object(forKey: "mds.hearing.sens") != nil
+    if let data = gui?.data(forKey: "mds.hearing.profiles"),
+       let ps = try? JSONDecoder().decode([HearingProfile].self, from: data),
+       let hit = HearingProfile.match(ps, deviceName: snap.name) {
+        real.sensitivity = hit.sensDB
+        real.impedance = hit.impOhm
+        real.maxVrms = hit.maxVrms
+        real.deviceAttenuationDB = hit.attenDB
+        fromGUI = true
+        print("耳机档案: \(hit.name)（按设备 \(snap.name) 匹配）")
+    }
     if let peak = HearingGuard.estimatedSPL(volumeDB: db, params: real),
        let avg = HearingGuard.averageSPL(peakSPL: peak, params: real) {
         let verdict = HearingGuard.exceedsThreshold(spl: peak, params: real)
