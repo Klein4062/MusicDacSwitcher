@@ -659,7 +659,7 @@ final class AppModel: ObservableObject {
             let avg = lastAvgSPL!
             let rateText = rate < 0.1 ? String(format: "%.3f", rate)
                 : (rate < 10 ? String(format: "%.2f", rate) : String(format: "%.1f", rate))
-            return "实时 \(rateText) %/h · 均值 ≈\(Int(avg.rounded())) dB"
+            return "实时 \(rateText) %/h · 当前 ≈\(Int(avg.rounded())) dB"
         }
         if burnRateText != text { burnRateText = text }
     }
