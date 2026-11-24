@@ -168,6 +168,9 @@ func cmdVol(_ args: [String]) {
                      real.deviceAttenuationDB) + verdict)
         print("提示: 峰值=满幅正弦等效上限，平均≈LAeq（告警口径）；机身旋钮控音量时在 GUI 面板填「机身衰减」；0 dB 音量 = 无衰减直通")
     }
+    if let hist = HearingLog.windowAverageSPL() {
+        print(String(format: "近7天均值: ≈ %.1f dB（所有播放的时长加权平均）", hist))
+    }
     if let dose = HearingLog.weeklyDose() {
         let eq = dose.equivalentHours < 1
             ? String(format: "%.0f 分钟", dose.equivalentHours * 60)

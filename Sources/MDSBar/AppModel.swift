@@ -335,9 +335,17 @@ final class AppModel: ObservableObject {
     private func reloadWeeklyDose() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let dose = HearingLog.weeklyDose()
-            DispatchQueue.main.async { self?.updateDoseText(dose) }
+            let histAvg = HearingLog.windowAverageSPL() // 近 7 天播放均值（与剂量同窗）
+            DispatchQueue.main.async {
+                self?.historyAvgSPL = histAvg
+                self?.updateDoseText(dose)
+            }
         }
     }
+
+    /// 近 7 天所有播放的时长加权均值声压（历史音量/时间口径）；
+    /// nil（无播放历史）时面板均值回退瞬时估算
+    @Published var historyAvgSPL: Double?
 
     private func updateDoseText(_ dose: HearingLog.Dose?) {
         lastDose = dose
@@ -600,7 +608,14 @@ final class AppModel: ObservableObject {
         let peakText = peak.map { String(format: "≤ %.0f dB SPL", $0) }
         if peakSPLText != peakText { peakSPLText = peakText }
         let avg = HearingGuard.averageSPL(peakSPL: peak, params: params, trackRMSDB: trackRMS)
-        let avgText = avg.map { String(format: "≈ %.0f dB SPL", $0) }
+        // 均值显示：近 7 天播放的时长加权均值（历史音量/时间口径，
+        // 随剂量节奏刷新）；无播放历史回退当前音量的瞬时估算
+        let avgText: String?
+        if let h = historyAvgSPL {
+            avgText = String(format: "≈ %.0f dB · 7天均值", h)
+        } else {
+            avgText = avg.map { String(format: "≈ %.0f dB SPL", $0) }
+        }
         if avgSPLText != avgText { avgSPLText = avgText }
         // 此刻声压：播放中随当前乐段电平起伏；停止归 0；播放中但曲目解不了
         // （网易云 .uc! 等加密缓存、流媒体）显示"不可测"而非误导性的 0。
@@ -624,7 +639,8 @@ final class AppModel: ObservableObject {
         if isLoud != loud {
             loud = isLoud
             if isLoud {
-                log("⚠️ 平均估算声压 \(avgText ?? "")（峰值 \(peakText ?? "")）已超过 \(Int(thresholdDB)) dB 阈值，建议调低音量（估算值，非实测）")
+                let instAvg = avg.map { String(format: "≈ %.0f", $0) } ?? "?"
+                log("⚠️ 当前估算声压 \(instAvg) dB（峰值 \(peakText ?? "")）已超过 \(Int(thresholdDB)) dB 阈值，建议调低音量（估算值，非实测）")
             }
             onLoudChange?(isLoud)
         }

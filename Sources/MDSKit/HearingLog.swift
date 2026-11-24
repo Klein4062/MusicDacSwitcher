@@ -129,6 +129,28 @@ public final class HearingLog {
         weeklyDose(entries: loadEntries(from: url), now: now)
     }
 
+    /// 滚动窗口内按播放时长加权的能量平均声压（LAeq,T 口径）：
+    /// 10·log₁₀(Σ s·10^(l/10) / Σ s)——近 7 天所有播放的"历史均值"，
+    /// 高声压时段按时长占权（80dB×1h + 90dB×1h ≈ 87.0），与剂量同窗。
+    /// 无有效条目 → nil。
+    public static func windowAverageSPL(entries: [Entry], now: Date,
+                                        window: TimeInterval = 7 * 86400) -> Double? {
+        let cutoff = now.timeIntervalSince1970 - window
+        var energy = 0.0, totalSec = 0.0
+        for e in entries where e.t > cutoff {
+            energy += e.s * pow(10, e.l / 10)
+            totalSec += e.s
+        }
+        guard totalSec > 0, energy > 0 else { return nil }
+        return 10 * log10(energy / totalSec)
+    }
+
+    /// 便捷：当前存储的滚动 7 天播放均值
+    public static func windowAverageSPL(fromFile url: URL = HearingLog.defaultURL,
+                                        now: Date = Date()) -> Double? {
+        windowAverageSPL(entries: loadEntries(from: url), now: now)
+    }
+
     /// 剩余额度在给定声压下的可听小时数（能量等效反解）：
     /// 剩余等效小时 × 10^((80−L)/10)。avgSPL 为 nil 时按 80dB 基准口径；
     /// 低于 80dB 时可听时长按 3dB 一倍放大。无剂量记录 → nil。

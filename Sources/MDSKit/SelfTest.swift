@@ -482,6 +482,20 @@ public func runSelfTest() {
                HearingGuard.instantSPL(peakSPL: 87.5, instantRMSDB: -30) == 57.5
                    && HearingGuard.instantSPL(peakSPL: nil, instantRMSDB: -30) == nil
                    && HearingGuard.instantSPL(peakSPL: 87.5, instantRMSDB: nil) == nil)
+        // 近 7 天播放均值：按播放时长加权的能量平均（80dB×1h + 90dB×1h ≈ 87.0）
+        let now7 = Date()
+        let mkEntry7 = { (ageSec: Double, secs: Double, spl: Double) in
+            HearingLog.Entry(t: now7.timeIntervalSince1970 - ageSec, s: secs, l: spl)
+        }
+        let es = [mkEntry7(60, 3600, 80), mkEntry7(120, 3600, 90)]
+        let la = HearingLog.windowAverageSPL(entries: es, now: now7)
+        expect("7天均值 = 时长加权能量平均（80×1h+90×1h ≈ 87.4）",
+               la != nil && abs(la! - 87.40) < 0.05
+                   && HearingLog.windowAverageSPL(entries: [], now: now7) == nil)
+        expect("7天均值窗口外剔除 + 时长占权（80×1h+90×3h ≈ 88.9）",
+               abs(HearingLog.windowAverageSPL(
+                    entries: [mkEntry7(8 * 86400, 3600, 100), mkEntry7(60, 3600, 80),
+                              mkEntry7(90, 3 * 3600, 90)], now: now7)! - 88.89) < 0.1)
         // 耳机档案匹配：关键词不区分大小写、含厂商名命中、空设备名 → nil
         let prof = HearingProfile(name: "TP55 · 彼岸银翼", matchKeywords: ["tp55"],
                                   sensDB: 105, impOhm: 40, maxVrms: 2.1, attenDB: 0)
