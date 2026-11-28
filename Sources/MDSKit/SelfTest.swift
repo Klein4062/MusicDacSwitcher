@@ -401,6 +401,14 @@ public func runSelfTest() {
         // 非法参数 → 防除零
         expect("阻抗 0 → 返回 nil 不崩溃",
                HearingGuard.estimatedSPL(volumeDB: 0, params: HearingGuard.Params(impedance: 0)) == nil)
+        // 档案不估算（maxVrms=0，如 HDB 630 自控音量耳机）：估不出也不告警，
+        // 剂量不累计（record 收到 spl=nil 即跳过）
+        expect("档案不估算（maxVrms=0）→ SPL 为 nil 且不告警",
+               HearingGuard.estimatedSPL(volumeDB: 0, params: HearingGuard.Params(maxVrms: 0)) == nil
+                   && !HearingGuard.exceedsThreshold(
+                       spl: HearingGuard.estimatedSPL(volumeDB: 0,
+                                                      params: HearingGuard.Params(maxVrms: 0)),
+                       params: HearingGuard.Params(maxVrms: 0)))
         // 机身衰减：mac 读数 0dB（拉满）+ 机身 -41.5dB ≡ 系统音量 -41.5dB
         let knob = HearingGuard.estimatedSPL(volumeDB: 0,
                                              params: HearingGuard.Params(deviceAttenuationDB: -41.5))

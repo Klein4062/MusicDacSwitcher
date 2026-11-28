@@ -18,7 +18,7 @@
 │  Log.swift           日志 sink（CLI→stdout，GUI→面板）           │
 │  TrackLevel.swift   曲目电平分析（ExtAudioFile 解码实测 RMS/峰值，缓存） │
 │  HearingLog.swift   暴露历史落盘（5min 桶 JSONL）+ WHO 周剂量计算      │
-│  SelfTest.swift      内置自测（88 项）                           │
+│  SelfTest.swift      内置自测（89 项）                           │
 └──────────────────────────────────────────────────────────────────┘
         ▲                                        ▲
 Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
@@ -64,6 +64,8 @@ Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
 | 熔断阈值 | `faultThreshold` | 2 次 | 连续达标进入稳定（只读）模式 |
 | 空闲应用延迟 | `idleApplyDelay` | 4s | 排除切歌间隙，避免与下一曲起播抢设备 |
 | 探测间隔 | `probeInterval` | 4s | 源扫描周期（CLI `--probe-interval`） |
+| 曲目状态宽限 | `probeNilGrace` | 12s | 探测间歇误报不清空曲目电平/分段状态 |
+| 剂量活跃宽限 | `probeLastActiveAt` | 12s | 累计剂量需设备 running 且近 12s 探测到播放文件 |
 | 手动切换抑制 | `manualOverrideDeadline` | 60s | 手动点按后不被探测立即覆盖 |
 | 写失败退避 | `lastFailedKey` | 30s | 驱动拒绝某格式时不反复暂停 IO |
 
@@ -83,6 +85,10 @@ Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
   超阈值边沿 → 状态栏图标变橙 + 系统通知（持续超阈值 5 分钟内不重复提醒）。
   估算参数（灵敏度/阻抗/满幅电压/阈值/峰值因子/机身衰减）持久化在 UserDefaults（`mds.hearing.*`）；
   满幅电压需跟随 DAC 机身增益档（模拟域切换，macOS 感知不到）；
-  机身旋钮不联动系统音量时（读数恒 0dB）衰减同样感知不到，经「机身衰减」参数手动补偿
+  机身旋钮不联动系统音量时（读数恒 0dB）衰减同样感知不到，经「机身衰减」参数手动补偿。
+  耳机档案按输出设备名自动套用（`mds.hearing.profiles`）；**自控音量耳机**
+  （如 HDB 630：耳机自身一道音量 mac 不可见）档案置「不估算」（maxVrms=0），
+  不显示声压、不累计剂量——宁缺毋错。剂量累计要求设备 running 且探测近期
+  确认在播文件：单看 running 会被浏览器残留音频会话虚记成整晚满幅暴露
 
 日志从 MDSKit 经 `LogSink.handler` 回调汇入 `AppModel`，0.5s 批量合并后刷 UI。

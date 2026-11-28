@@ -134,24 +134,45 @@ final class AppModel: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "mds.hearing.profiles"),
            let ps = try? JSONDecoder().decode([HearingProfile].self, from: data),
            !ps.isEmpty {
-            return ps
+            // 迁移：早期预置按「满幅 ≈110 dB + 数字音量衰减」建模 HDB 630，
+            // 实测证伪——耳机自身还有一道 mac 不可见的音量，估算会把整晚
+            // 虚记成满幅声压（一度周剂量虚标 300%）。强制改为不估算
+            // （maxVrms=0 → estimatedSPL 返回 nil，不显示不累计剂量）。
+            // 仅修正旧预置的两套 HDB 档案；用户手动建的其他档案不动
+            var migrated = ps
+            let hdbKeys: Set<String> = ["hdb 630", "hdb630", "btd 700", "btd700"]
+            func isHDB(_ p: HearingProfile) -> Bool {
+                Set(p.matchKeywords.map { $0.lowercased() }).intersection(hdbKeys).isEmpty == false
+            }
+            if migrated.contains(where: { isHDB($0) && $0.maxVrms > 0 }) {
+                for i in migrated.indices where isHDB(migrated[i]) && migrated[i].maxVrms > 0 {
+                    migrated[i].maxVrms = 0
+                }
+                // 编码失败时宁可不动存量：set(nil) 会把 key 整个删掉
+                if let data = try? JSONEncoder().encode(migrated) {
+                    UserDefaults.standard.set(data, forKey: "mds.hearing.profiles")
+                }
+            }
+            return migrated
         }
-        // 预置三套常用组合。HDB 630 为纯数字主动耳机（无模拟输入，
-        // THD 0.2% @105 dB SPL）：按「满幅声压 ≈110 dB + 数字音量衰减」
-        // 建模（sens=80/imp=1/vrms=1），听感偏差可在面板直接改并回存档案
+        // 预置三套常用组合。HDB 630 为纯数字主动耳机（无模拟输入），
+        // 且自带一道 mac 不可见的音量——电压/灵敏度模型无从校准，
+        // 置为不估算（maxVrms=0）：不显示声压、不累计剂量，宁缺毋错
         return [
             HearingProfile(name: "TP55 · 彼岸银翼", matchKeywords: ["tp55"],
                            sensDB: 105, impOhm: 40, maxVrms: 2.1, attenDB: 0),
             HearingProfile(name: "HDB 630 有线 USB-C", matchKeywords: ["hdb 630", "hdb630"],
-                           sensDB: 80, impOhm: 1, maxVrms: 1.0, attenDB: 0),
+                           sensDB: 80, impOhm: 1, maxVrms: 0, attenDB: 0),
             HearingProfile(name: "HDB 630 · BTD 700", matchKeywords: ["btd 700", "btd700"],
-                           sensDB: 80, impOhm: 1, maxVrms: 1.0, attenDB: 0),
+                           sensDB: 80, impOhm: 1, maxVrms: 0, attenDB: 0),
         ]
     }
 
     private func persistProfiles() {
-        UserDefaults.standard.set(try? JSONEncoder().encode(profiles),
-                                  forKey: "mds.hearing.profiles")
+        // 编码失败时不动存量（set(nil) 等于删 key，会把档案全部丢掉）
+        if let data = try? JSONEncoder().encode(profiles) {
+            UserDefaults.standard.set(data, forKey: "mds.hearing.profiles")
+        }
     }
 
     /// 选用档案：载入参数（阈值/峰值因子为全局策略，不随档案）
@@ -430,6 +451,12 @@ final class AppModel: ObservableObject {
     /// 保留曲目状态不清空，避免「此刻声压/曲电平」在可测与归零间摇摆。
     private var probeNilSince: Date?
 
+    /// 最近一次探测到「正在播放的文件」的时刻。设备 runningSomewhere 只说明
+    /// 有进程占着音频 IO（浏览器残留会话也会亮），不等于在听——剂量累计
+    /// 需二者联判（isRunning 且距最近播放探测 ≤12s，宽限同曲目状态口径，
+    /// 防预读饱和的间歇误报漏记；网页流媒体无文件可探，宁漏记不错记）
+    private var probeLastActiveAt: Date?
+
     private func handlePlayingProbe(_ probe: SourceProbe.Probe?) {
         guard let probe else {
             if probeNilSince == nil {
@@ -445,6 +472,7 @@ final class AppModel: ObservableObject {
             return
         }
         probeNilSince = nil
+        probeLastActiveAt = Date()
         let key = TrackLevelAnalyzer.canonicalPath(probe.path)
         let globalOffset = TrackLevelAnalyzer.globalOffsetBytes(path: probe.path,
                                                                 offsetBytes: probe.offset)
@@ -628,6 +656,10 @@ final class AppModel: ObservableObject {
             liveText = "此刻 0 dB（静音）"
         } else if let live {
             liveText = String(format: "此刻 ≈%.0f dB", live)
+        } else if peak == nil {
+            // 音量读得到但估不出声压：档案不估算（如 HDB 630，耳机自控
+            // 音量 mac 不可见）——区别于曲目不可测，避免误导
+            liveText = "此刻 —（档案不估算）"
         } else if isRunning {
             liveText = "此刻 —（曲目不可测）"
         } else {
@@ -644,8 +676,11 @@ final class AppModel: ObservableObject {
             }
             onLoudChange?(isLoud)
         }
-        // 暴露历史：仅播放中且有估算声压时累计（周剂量数据源）
-        hearingLog.record(avgSPL: avg, playing: isRunning)
+        // 暴露历史：设备在跑且探测近期确认在播文件才累计（周剂量数据源）。
+        // 单看 isRunning 会被残留音频会话虚记——实测一夜虚记数小时满幅
+        // 声压，周剂量虚标 300%；宁漏记（网页流媒体无文件可探）不错记
+        let probeActive = probeLastActiveAt.map { Date().timeIntervalSince($0) <= 12 } ?? false
+        hearingLog.record(avgSPL: avg, playing: isRunning && probeActive)
         if lastAvgSPL != avg {
             lastAvgSPL = avg
             updateDoseRemainText() // 剩余时长随当前声压实时刷新
