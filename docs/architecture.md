@@ -18,7 +18,7 @@
 │  Log.swift           日志 sink（CLI→stdout，GUI→面板）           │
 │  TrackLevel.swift   曲目电平分析（ExtAudioFile 解码实测 RMS/峰值，缓存） │
 │  HearingLog.swift   暴露历史落盘（5min 桶 JSONL）+ WHO 周剂量计算      │
-│  SelfTest.swift      内置自测（89 项）                           │
+│  SelfTest.swift      内置自测（90 项）                           │
 └──────────────────────────────────────────────────────────────────┘
         ▲                                        ▲
 Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
@@ -88,7 +88,9 @@ Sources/mds（CLI 入口）                Sources/MDSBar（菜单栏 GUI）
   机身旋钮不联动系统音量时（读数恒 0dB）衰减同样感知不到，经「机身衰减」参数手动补偿。
   耳机档案按输出设备名自动套用（`mds.hearing.profiles`）；**自控音量耳机**
   （如 HDB 630：耳机自身一道音量 mac 不可见）档案置「不估算」（maxVrms=0），
-  不显示声压、不累计剂量——宁缺毋错。剂量累计要求设备 running 且探测近期
-  确认在播文件：单看 running 会被浏览器残留音频会话虚记成整晚满幅暴露
+  不显示声压、不累计剂量——宁缺毋错。**无匹配档案的设备（外放/未建档）
+  同样阻断估算**：上一台耳机的参数残留到外放会严重失真。剂量累计要求
+  设备 running 且探测近期确认在播文件：单看 running 会被浏览器残留
+  音频会话虚记成整晚满幅暴露
 
 日志从 MDSKit 经 `LogSink.handler` 回调汇入 `AppModel`，0.5s 批量合并后刷 UI。

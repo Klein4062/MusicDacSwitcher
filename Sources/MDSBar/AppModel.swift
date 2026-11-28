@@ -200,13 +200,29 @@ final class AppModel: ObservableObject {
     }
 
     /// 输出设备变化时自动跟随档案（仅设备名变化那一刻触发，
-    /// 避免覆盖用户手动选择）
+    /// 避免覆盖用户手动选择）。无匹配档案（外放/未建档输出）时清掉
+    /// 残留档案——否则上一台耳机的参数会继续估算新设备，实测外放
+    /// 挂着耳机满幅参数冒出 100dB+ 条目；清除后走「不估算」路径
     private func autoFollowProfile(deviceName: String) {
-        guard autoProfile,
-              let hit = HearingProfile.match(profiles, deviceName: deviceName),
-              hit.id != activeProfileID else { return }
+        guard autoProfile else { return }
+        guard let hit = HearingProfile.match(profiles, deviceName: deviceName) else {
+            if activeProfileID != nil {
+                log("🎧 输出设备「\(deviceName)」无匹配档案 → 停止估算（外放/未建档，不计剂量）")
+                activeProfileID = nil
+            }
+            return
+        }
+        guard hit.id != activeProfileID else { return }
         log("🎧 输出设备「\(deviceName)」→ 自动套用档案「\(hit.name)」")
         selectProfile(hit.id)
+    }
+
+    /// 当前是否阻断估算（派生态，不存储）：跟随开启 + 无选中档案 +
+    /// 设备无匹配 → 参数无从校准，宁缺毋错。手动选档案/关跟随则照常
+    private var estimationBlocked: Bool {
+        HearingProfile.estimationBlocked(profiles: profiles, deviceName: deviceName,
+                                         autoFollow: autoProfile,
+                                         hasActiveProfile: activeProfileID != nil)
     }
     /// 当前有效衰减（dB，mac 读数 + 机身衰减，如 "-41.5 dB"；静音显示"静音"；无属性为 nil）
     @Published var volumeDBText: String?
@@ -631,7 +647,8 @@ final class AppModel: ObservableObject {
         let newText = vol.muted ? "静音" : String(format: "%.1f dB", db + attenDB)
         if volumeDBText != newText { volumeDBText = newText }
 
-        let params = hearingParams
+        var params = hearingParams
+        if estimationBlocked { params.maxVrms = 0 } // 外放/未建档：参数无从校准，不估算
         let peak = vol.muted ? nil : HearingGuard.estimatedSPL(volumeDB: db, params: params)
         let peakText = peak.map { String(format: "≤ %.0f dB SPL", $0) }
         if peakSPLText != peakText { peakSPLText = peakText }
@@ -657,9 +674,9 @@ final class AppModel: ObservableObject {
         } else if let live {
             liveText = String(format: "此刻 ≈%.0f dB", live)
         } else if peak == nil {
-            // 音量读得到但估不出声压：档案不估算（如 HDB 630，耳机自控
-            // 音量 mac 不可见）——区别于曲目不可测，避免误导
-            liveText = "此刻 —（档案不估算）"
+            // 音量读得到但估不出声压：档案不估算（如 HDB 630 自控音量
+            // 不可见）或设备无匹配档案（外放）——区别于曲目不可测
+            liveText = "此刻 —（不估算）"
         } else if isRunning {
             liveText = "此刻 —（曲目不可测）"
         } else {

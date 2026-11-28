@@ -513,6 +513,17 @@ public func runSelfTest() {
                    && HearingProfile.match([prof], deviceName: "MacBook Pro扬声器") == nil
                    && HearingProfile.match([prof], deviceName: nil) == nil
                    && HearingProfile.match([], deviceName: "TP55") == nil)
+        // 无匹配档案阻断估算：外放/未建档不按残留耳机参数瞎猜（宁缺毋错）；
+        // 手动选档案或关跟随（手动模式）则照常估算
+        expect("外放无匹配档案 → 阻断估算；选档案/关跟随 → 照常",
+               HearingProfile.estimationBlocked(profiles: [prof], deviceName: "MacBook Pro扬声器",
+                                                autoFollow: true, hasActiveProfile: false)
+                   && !HearingProfile.estimationBlocked(profiles: [prof], deviceName: "TP55",
+                                                        autoFollow: true, hasActiveProfile: false)
+                   && !HearingProfile.estimationBlocked(profiles: [prof], deviceName: "MacBook Pro扬声器",
+                                                        autoFollow: true, hasActiveProfile: true)
+                   && !HearingProfile.estimationBlocked(profiles: [prof], deviceName: "MacBook Pro扬声器",
+                                                        autoFollow: false, hasActiveProfile: false))
         // 分片组聚合：临时目录造 3 片编号 WAV（各 5s/8kHz/振幅 0.5、1.0、0.25）
         let shardDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("mds-shard-\(UUID().uuidString)")

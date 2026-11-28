@@ -50,4 +50,15 @@ public struct HearingProfile: Codable, Equatable, Identifiable {
             }
         }
     }
+
+    /// 是否阻断估算：自动跟随开启、当前设备无匹配档案、且用户未手动选
+    /// 档案时，参数无从校准（外放音箱/未建档输出）——按残留的耳机参数
+    /// 瞎猜会严重失真（实测外放挂耳机档案冒出 100dB+ 暴露条目）。
+    /// 宁缺毋错：不估算、不累计剂量。有选中档案（含手动选，用户意图
+    /// 优先）或关闭跟随（手动模式自负）则可估算。
+    public static func estimationBlocked(profiles: [HearingProfile], deviceName: String?,
+                                         autoFollow: Bool, hasActiveProfile: Bool) -> Bool {
+        guard autoFollow, !hasActiveProfile else { return false }
+        return match(profiles, deviceName: deviceName) == nil
+    }
 }

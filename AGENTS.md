@@ -6,7 +6,7 @@ macOS 音频输出格式自动切换工具（菜单栏 App + CLI）。公共仓�
 
 ```bash
 swift build                          # 构建（无第三方依赖）
-.build/debug/mds selftest            # 89 项自测，改逻辑后必须全绿
+.build/debug/mds selftest            # 90 项自测，改逻辑后必须全绿
 ./scripts/make-app.sh --install      # 构建并安装 GUI 到 /Applications
 pkill -f "MusicDacSwitcher.app/Contents/MacOS"; open /Applications/MusicDacSwitcher.app   # 重启 GUI
 ```

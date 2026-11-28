@@ -148,15 +148,21 @@ func cmdVol(_ args: [String]) {
         crestDB: gui?.object(forKey: "mds.hearing.crest") as? Double ?? params.crestDB,
         deviceAttenuationDB: gui?.object(forKey: "mds.hearing.atten") as? Double ?? params.deviceAttenuationDB)
     var fromGUI = gui?.object(forKey: "mds.hearing.sens") != nil
+    let autoFollow = gui?.object(forKey: "mds.hearing.autoprofile") as? Bool ?? true
     if let data = gui?.data(forKey: "mds.hearing.profiles"),
        let ps = try? JSONDecoder().decode([HearingProfile].self, from: data),
-       let hit = HearingProfile.match(ps, deviceName: snap.name) {
-        real.sensitivity = hit.sensDB
-        real.impedance = hit.impOhm
-        real.maxVrms = hit.maxVrms
-        real.deviceAttenuationDB = hit.attenDB
-        fromGUI = true
-        print("耳机档案: \(hit.name)（按设备 \(snap.name) 匹配）")
+       !ps.isEmpty {
+        if let hit = HearingProfile.match(ps, deviceName: snap.name) {
+            real.sensitivity = hit.sensDB
+            real.impedance = hit.impOhm
+            real.maxVrms = hit.maxVrms
+            real.deviceAttenuationDB = hit.attenDB
+            fromGUI = true
+            print("耳机档案: \(hit.name)（按设备 \(snap.name) 匹配）")
+        } else if autoFollow {
+            // 与 GUI 一致：外放/未建档设备不按残留耳机参数瞎猜（宁缺毋错）
+            real.maxVrms = 0
+        }
     }
     if let peak = HearingGuard.estimatedSPL(volumeDB: db, params: real),
        let avg = HearingGuard.averageSPL(peakSPL: peak, params: real) {
@@ -168,8 +174,9 @@ func cmdVol(_ args: [String]) {
                      real.deviceAttenuationDB) + verdict)
         print("提示: 峰值=满幅正弦等效上限，平均≈LAeq（告警口径）；机身旋钮控音量时在 GUI 面板填「机身衰减」；0 dB 音量 = 无衰减直通")
     } else if real.maxVrms <= 0 {
-        // 档案不估算（如 HDB 630）：耳机自控音量 mac 不可见，模型无从校准
-        print("估算声压: —（当前档案不估算：耳机自控音量 mac 不可见，宁缺毋错，不累计剂量）")
+        // 不估算：档案置为不估算（如 HDB 630 自控音量不可见），或设备
+        // 无匹配档案（外放）——参数无从校准，宁缺毋错，不累计剂量
+        print("估算声压: —（不估算：档案不可校准或设备无匹配档案，不累计剂量）")
     }
     if let hist = HearingLog.windowAverageSPL() {
         print(String(format: "近7天均值: ≈ %.1f dB（所有播放的时长加权平均）", hist))
